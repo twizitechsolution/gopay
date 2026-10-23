@@ -71,17 +71,31 @@ def rebrand_apk(
         try:
             with open(cap_cfg, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
-            cfg["appId"] = new_package_id
+            # Crucial: appId must match AndroidManifest.xml package (com.airwallex.app)
+            # Mismatches break Capacitor's Android native bridge initialization!
+            cfg["appId"] = "com.airwallex.app"
             cfg["appName"] = new_app_name
             with open(cap_cfg, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, indent=2)
-            print("  -> Updated capacitor.config.json")
+            print("  -> Updated capacitor.config.json (appName: Gopay, appId: com.airwallex.app)")
         except Exception as e:
             print(f"  -> Error updating capacitor.config.json: {e}")
 
-    # 5. Replace branding in assets/public
+    # 4b. Remove legacy vector icon drawables that override launcher icons
+    for legacy_xml in [
+        os.path.join(temp_dir, "res", "drawable-v24", "ic_launcher_foreground.xml"),
+        os.path.join(temp_dir, "res", "drawable-v24", "$ic_launcher_foreground__0.xml"),
+    ]:
+        if os.path.exists(legacy_xml):
+            try:
+                os.remove(legacy_xml)
+                print(f"  -> Removed legacy vector icon: {os.path.basename(legacy_xml)}")
+            except Exception as e:
+                pass
+
+    # 5. Replace branding strictly in assets/public (never touch native-bridge.js or capacitor.config.json)
     print("[2/5] Replacing API URL and Brand Name in bundled assets...")
-    pub_dir = os.path.join(temp_dir, "assets")
+    pub_dir = os.path.join(temp_dir, "assets", "public")
     replaced = 0
     old_urls = [
         "https://airwallex-backend-seven.vercel.app/api",
@@ -196,7 +210,8 @@ def rebrand_apk(
                 l_img.save(os.path.join(fpath, 'ic_launcher_round.png'), 'PNG')
 
                 # Adaptive foreground (65% safe zone)
-                fg_canvas = Image.new('RGBA', (fg_size, fg_size), (0, 0, 0, 0))
+                # Opaque blue background (1, 59, 228, 255) ensures ZERO white corners/patches
+                fg_canvas = Image.new('RGBA', (fg_size, fg_size), (1, 59, 228, 255))
                 fg_inner = int(fg_size * 0.65)
                 fg_content = content.resize((fg_inner, fg_inner), Image.Resampling.LANCZOS)
                 fg_offset = (fg_size - fg_inner) // 2
@@ -205,6 +220,20 @@ def rebrand_apk(
             print("  -> Launcher and adaptive foreground icons generated successfully for all mipmaps.")
     except Exception as icon_err:
         print(f"  -> Warning: Pillow icon processing error: {icon_err}")
+
+    # 6b. Verify capacitor.config.json appId matches AndroidManifest.xml package
+    cap_cfg = os.path.join(temp_dir, "assets", "capacitor.config.json")
+    if os.path.exists(cap_cfg):
+        try:
+            with open(cap_cfg, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            cfg["appId"] = "com.airwallex.app"
+            cfg["appName"] = new_app_name
+            with open(cap_cfg, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, indent=2)
+            print("  -> Final verified capacitor.config.json: appId=com.airwallex.app, appName=" + new_app_name)
+        except Exception as e:
+            pass
 
     # 7. Repack APK
     print("[3/5] Compressing files into unaligned APK...")
