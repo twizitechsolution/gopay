@@ -26,32 +26,18 @@ function getMysqlConfig() {
   }
 
   // Check individual environment variables
-  const host = process.env.MYSQL_HOST || process.env.DB_HOST;
-  const database = process.env.MYSQL_DATABASE || process.env.DB_NAME;
-  const user = process.env.MYSQL_USER || process.env.DB_USER || 'root';
-  const password = process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD || '';
+  const host = process.env.MYSQL_HOST || process.env.DB_HOST || '127.0.0.1';
+  const database = process.env.MYSQL_DATABASE || process.env.DB_NAME || 'gopay_db';
+  const user = process.env.MYSQL_USER || process.env.DB_USER || 'gopay_user';
+  const password = process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD || 'tKJT4MdTZeaaKzDG';
   const port = parseInt(process.env.MYSQL_PORT || process.env.DB_PORT, 10) || 3306;
 
-  if (!host && !database) {
-    return {
-      host: '127.0.0.1',
-      port: 3306,
-      user: 'root',
-      password: '',
-      database: 'gopay_db',
-      waitForConnections: true,
-      connectionLimit: 15,
-      queueLimit: 0,
-      charset: 'utf8mb4'
-    };
-  }
-
   return {
-    host: host || '127.0.0.1',
-    port: port,
-    user: user,
-    password: password,
-    database: database || 'gopay_db',
+    host,
+    port,
+    user,
+    password,
+    database,
     waitForConnections: true,
     connectionLimit: 15,
     queueLimit: 0,
