@@ -1,0 +1,35 @@
+name: Deploy Gopay to aaPanel Server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to aaPanel Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        if: env.SERVER_HOST != ''
+        env:
+          SERVER_HOST: ${{ secrets.AAPANEL_SERVER_IP }}
+        with:
+          host: ${{ secrets.AAPANEL_SERVER_IP }}
+          username: ${{ secrets.AAPANEL_SSH_USER || 'root' }}
+          key: ${{ secrets.AAPANEL_SSH_PRIVATE_KEY }}
+          password: ${{ secrets.AAPANEL_SSH_PASSWORD }}
+          port: ${{ secrets.AAPANEL_SSH_PORT || 22 }}
+          script: |
+            cd /www/wwwroot/gopay
+            git fetch origin main
+            git reset --hard origin/main
+            cd backend
+            npm install --production --no-audit
+            pm2 reload gopay-backend || pm2 start ecosystem.config.json --name "gopay-backend"
+            pm2 save
+            echo "Deployment to aaPanel finished successfully!"
