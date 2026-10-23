@@ -14,6 +14,9 @@ exports.getProfile = async (req, res) => {
     user.inr_balance = Number(user.inr_balance) || 0;
     user.bcoin_balance = Number(user.bcoin_balance) || 0;
     user.total_earnings = Number(user.total_earnings) || 0;
+    user.today_profit = Number(user.today_profit) || 0;
+    user.yesterday_profit = Number(user.yesterday_profit) || 0;
+    user.username = user.username || `Gopay_${user.uid || user.id}`;
     user.total_sells = 0;
 
     // Fast tasks lookup
@@ -183,7 +186,7 @@ exports.getTeamDetails = async (req, res) => {
       enrichedL1.push({
         uid: u.uid,
         ordersTotal: orderStats ? (orderStats.total || 0.0) : 0.0,
-        commissionGenerated: commissionStats ? (commissionStats.sum || 0.0) : 0.0,
+        commissionGenerated: Number(commissionStats ? commissionStats.sum : 0) || 0,
         created_at: u.created_at
       });
     }
@@ -200,9 +203,9 @@ exports.getTeamDetails = async (req, res) => {
         l1MembersCount: l1Users.length,
         l2MembersCount: l2Users.length,
         l3MembersCount: l3Users.length,
-        l1Commission: l1CommSum ? (l1CommSum.sum || 0.0) : 0.0,
-        l2Commission: l2CommSum ? (l2CommSum.sum || 0.0) : 0.0,
-        l3Commission: l3CommSum ? (l3CommSum.sum || 0.0) : 0.0,
+        l1Commission: Number(l1CommSum ? l1CommSum.sum : 0) || 0,
+        l2Commission: Number(l2CommSum ? l2CommSum.sum : 0) || 0,
+        l3Commission: Number(l3CommSum ? l3CommSum.sum : 0) || 0,
       },
       teamList: enrichedL1
     });

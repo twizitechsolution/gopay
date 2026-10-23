@@ -135,25 +135,69 @@ def rebrand_apk(
 
     print(f"  -> Rebranded {replaced} asset files.")
 
-    # 6. Optional: Replace App Icon if provided
-    if not new_logo_path:
-        default_icon = os.path.join(base_dir, "gopay_icon.png")
-        if os.path.exists(default_icon):
-            new_logo_path = default_icon
+    # 5b. Overwrite bundled assets with fixed workspace assets if available
+    fixed_js = os.path.join(base_dir, "..", "assets", "public", "assets", "index-CVMZi8sX.js")
+    if not os.path.exists(fixed_js):
+        fixed_js = os.path.join(base_dir, "..", "user_web", "assets", "index-CVMZi8sX.js")
+    if os.path.exists(fixed_js):
+        dest_js = os.path.join(temp_dir, "assets", "public", "assets", "index-CVMZi8sX.js")
+        if os.path.exists(os.path.dirname(dest_js)):
+            shutil.copy2(fixed_js, dest_js)
+            print("  -> Injected fixed and rebranded index-CVMZi8sX.js bundle.")
 
-    if new_logo_path and os.path.exists(new_logo_path):
-        print("[2b/5] Replacing app launcher icons...")
+    # 6. Replace App Icon with proper Android density scaling and adaptive padding
+    print("[2b/5] Generating and replacing app launcher icons for all densities...")
+    try:
+        from PIL import Image
+        icon_src = os.path.join(base_dir, "gopay_icon_padded.png")
+        if not os.path.exists(icon_src):
+            icon_src = os.path.join(base_dir, "gopay_icon.png")
+        
+        src_img = Image.open(icon_src).convert('RGBA')
+        bbox = src_img.getbbox()
+        content = src_img.crop(bbox)
+
+        # 512x512 master classic icon with 18% margin
+        master_classic = Image.new('RGBA', (512, 512), (0, 0, 0, 0))
+        target_size = int(512 * 0.82)
+        content_scaled = content.resize((target_size, target_size), Image.Resampling.LANCZOS)
+        offset = (512 - target_size) // 2
+        master_classic.paste(content_scaled, (offset, offset), content_scaled)
+
+        densities = {
+            'mipmap-mdpi': (48, 108),
+            'mipmap-hdpi': (72, 162),
+            'mipmap-xhdpi': (96, 216),
+            'mipmap-xxhdpi': (144, 324),
+            'mipmap-xxxhdpi': (192, 432),
+            'mipmap-mdpi-v4': (48, 108),
+            'mipmap-hdpi-v4': (72, 162),
+            'mipmap-xhdpi-v4': (96, 216),
+            'mipmap-xxhdpi-v4': (144, 324),
+            'mipmap-xxxhdpi-v4': (192, 432),
+        }
+
         res_dir = os.path.join(temp_dir, "res")
         if os.path.exists(res_dir):
-            for root, dirs, files in os.walk(res_dir):
-                for f in files:
-                    if f.startswith("ic_launcher") and f.endswith(".png"):
-                        target_ic = os.path.join(root, f)
-                        try:
-                            shutil.copy2(new_logo_path, target_ic)
-                        except Exception as e:
-                            pass
-            print("  -> Launcher icons updated.")
+            for folder, (l_size, fg_size) in densities.items():
+                fpath = os.path.join(res_dir, folder)
+                if not os.path.exists(fpath):
+                    continue
+                # Classic icons
+                l_img = master_classic.resize((l_size, l_size), Image.Resampling.LANCZOS)
+                l_img.save(os.path.join(fpath, 'ic_launcher.png'), 'PNG')
+                l_img.save(os.path.join(fpath, 'ic_launcher_round.png'), 'PNG')
+
+                # Adaptive foreground
+                fg_canvas = Image.new('RGBA', (fg_size, fg_size), (0, 0, 0, 0))
+                fg_inner = int(fg_size * 0.62)
+                fg_content = content.resize((fg_inner, fg_inner), Image.Resampling.LANCZOS)
+                fg_offset = (fg_size - fg_inner) // 2
+                fg_canvas.paste(fg_content, (fg_offset, fg_offset), fg_content)
+                fg_canvas.save(os.path.join(fpath, 'ic_launcher_foreground.png'), 'PNG')
+            print("  -> Launcher and adaptive foreground icons generated successfully for all mipmaps.")
+    except Exception as icon_err:
+        print(f"  -> Warning: Pillow icon processing error: {icon_err}")
 
     # 7. Repack APK
     print("[3/5] Compressing files into unaligned APK...")
@@ -240,6 +284,14 @@ def rebrand_apk(
         if res.returncode == 0:
             signed = True
             print("  -> Signed successfully with jarsigner.")
+
+    # Copy to user_web
+    user_web_apk = os.path.join(base_dir, "..", "user_web", "Gopay.apk")
+    try:
+        shutil.copy2(output_apk, user_web_apk)
+        print(f"  -> Copied to {user_web_apk}")
+    except Exception as e:
+        pass
 
     print("==================================================")
     print(f"[OK] APK Generation Completed!")

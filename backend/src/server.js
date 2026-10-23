@@ -408,6 +408,19 @@ app.get('/api/price-ranges', async (req, res) => {
 app.get('/api/settings', async (req, res) => {
   try {
     loadDb();
+    const { isMysqlConnected, fetchAllFromMysql } = require('./mysql');
+    if (isMysqlConnected()) {
+      try {
+        const rows = await fetchAllFromMysql('settings');
+        const cfgRow = (rows || []).find(r => r.key === 'config');
+        if (cfgRow && cfgRow.value) {
+          const parsed = typeof cfgRow.value === 'string' ? JSON.parse(cfgRow.value) : cfgRow.value;
+          dbData.settings = { ...(dbData.settings || {}), ...parsed };
+        }
+      } catch (mErr) {
+        console.warn('[Settings] MySQL fetch error:', mErr.message);
+      }
+    }
     try {
       const { supabase, isSupabaseConnected } = require('./supabase');
       if (isSupabaseConnected()) {
@@ -422,6 +435,9 @@ app.get('/api/settings', async (req, res) => {
       success: true, 
       settings: {
         ...config,
+        telegram_link: config.telegram_link || config.telegram_channel || config.telegram_support || 'https://t.me/Gopay',
+        telegram_support: config.telegram_support || config.telegram_link || config.telegram_channel || 'https://t.me/Gopay',
+        telegram_channel: config.telegram_channel || config.telegram_link || config.telegram_support || 'https://t.me/Gopay',
         default_ref_code: config.default_ref_code || 'tp3340vnxr',
         min_order_amount: Number(config.min_order_amount) > 0 ? Number(config.min_order_amount) : 500,
         max_order_amount: Number(config.max_order_amount) > 0 ? Number(config.max_order_amount) : 100000
@@ -493,6 +509,7 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
 
             return {
               ...order,
+              amount: Number(order.amount) || 0,
               user_uid: user.uid || (order.user_uid || 'N/A'),
               user_mobile: user.mobile || (order.user_mobile || 'N/A'),
               receiver_mobile,
@@ -518,6 +535,7 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
       `);
 
       list.forEach(order => {
+        order.amount = Number(order.amount) || 0;
         const recId = order.receiver_id;
         if (recId) {
           const receiverUser = (dbData.users || []).find(u => u.id == recId);
