@@ -11,14 +11,14 @@
     <script>
       window.__DEFAULT_REF = 'tp3340vnxr';
       try {
-        fetch('http://localhost:5000/api/settings').then(r => r.json()).then(d => {
+        fetch('/api/settings').then(r => r.json()).then(d => {
           if (d && d.settings && d.settings.default_ref_code) {
             window.__DEFAULT_REF = d.settings.default_ref_code;
           }
         }).catch(function(){});
       } catch(e) {}
     </script>
-    <script type="module" crossorigin src="/assets/index-CVMZi8sX.js?v=20"></script>
+    <script type="module" crossorigin src="/assets/index-CVMZi8sX.js?v=21"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-CKXErF3w.css">
   </head>
   <body class="flex items-center justify-center min-h-screen bg-[#eef1f5]">
