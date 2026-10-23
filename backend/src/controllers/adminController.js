@@ -121,18 +121,19 @@ exports.getDashboardStats = async (req, res) => {
       allProducts = dbData.products || [];
     }
 
-    let totalUsers = allUsers.length;
-    let completedOrdersList = allOrders.filter(o => o.status === 'Completed');
-    let pendingOrdersCount = allOrders.filter(o => o.status === 'Confirming' || o.status === 'Pending').length;
+    let totalUsers = (allUsers || []).length;
+    let completedOrdersList = (allOrders || []).filter(o => o && o.status === 'Completed');
+    let pendingOrdersCount = (allOrders || []).filter(o => o && (o.status === 'Confirming' || o.status === 'Pending')).length;
     let completedOrdersCount = completedOrdersList.length;
-    let canceledOrdersCount = allOrders.filter(o => o.status === 'Canceled').length;
+    let canceledOrdersCount = (allOrders || []).filter(o => o && o.status === 'Canceled').length;
 
     const totalDeposits = completedOrdersList.reduce((sum, o) => sum + (Number(o.amount) || 0), 0);
     const totalVolume = totalDeposits;
-    const totalWithdrawals = withdrawTxns.reduce((sum, t) => sum + Math.abs(Number(t.amount) || 0), 0);
+    const totalWithdrawals = (withdrawTxns || []).reduce((sum, t) => sum + Math.abs(Number(t.amount) || 0), 0);
 
     // Active plans breakdown
-    const activePlansBreakdown = (dbData.products || allProducts).map(p => {
+    const safeProducts = (allProducts && allProducts.length > 0) ? allProducts : ((dbData && dbData.products) || []);
+    const activePlansBreakdown = safeProducts.map(p => {
       const matchingOrders = completedOrdersList.filter(o => Math.abs((Number(o.amount) || 0) - Number(p.amount)) < 0.01);
       return {
         id: p.id,
@@ -144,6 +145,12 @@ exports.getDashboardStats = async (req, res) => {
       };
     });
 
+    const formatYMD = (val) => {
+      if (!val) return '';
+      if (val instanceof Date) return val.toISOString().split('T')[0];
+      return String(val).split('T')[0].split(' ')[0];
+    };
+
     // Generate 7-day chart data
     const chartData = [];
     for (let i = 6; i >= 0; i--) {
@@ -153,11 +160,11 @@ exports.getDashboardStats = async (req, res) => {
       const label = d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
       
       const dayDeposits = completedOrdersList.filter(o => {
-        return o.created_at && o.created_at.startsWith(dateString);
+        return formatYMD(o.created_at) === dateString;
       }).reduce((sum, o) => sum + (Number(o.amount) || 0), 0);
       
-      const dayWithdrawals = withdrawTxns.filter(t => {
-        return t.created_at && t.created_at.startsWith(dateString);
+      const dayWithdrawals = (withdrawTxns || []).filter(t => {
+        return formatYMD(t.created_at) === dateString;
       }).reduce((sum, t) => sum + Math.abs(Number(t.amount) || 0), 0);
       
       chartData.push({
@@ -318,6 +325,16 @@ exports.toggleUserBlock = async (req, res) => {
       }
     }
 
+    // Update MySQL database directly
+    try {
+      const { isMysqlConnected, queryMysql } = require('../mysql');
+      if (isMysqlConnected()) {
+        await queryMysql('UPDATE users SET is_blocked = ? WHERE id = ?', [newBlockedState ? 1 : 0, id]);
+      }
+    } catch (mErr) {
+      console.warn('[toggleUserBlock] MySQL update warning:', mErr.message);
+    }
+
     // Update query simulator cache
     try {
       await query.run('UPDATE users SET is_blocked = ? WHERE id = ?', [newBlockedState ? 1 : 0, id]);
@@ -383,13 +400,13 @@ exports.getReportsData = async (req, res) => {
     const matchesDate = (isoStr, targetDate) => {
       if (!isoStr || !targetDate) return false;
       try {
-        const d = new Date(isoStr);
+        const d = (isoStr instanceof Date) ? isoStr : new Date(isoStr);
         if (isNaN(d.getTime())) return false;
         const ist = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-        const utc = isoStr.split('T')[0];
+        const utc = d.toISOString().split('T')[0];
         return ist === targetDate || utc === targetDate;
       } catch (_) {
-        return isoStr.startsWith(targetDate);
+        return String(isoStr).startsWith(targetDate);
       }
     };
 
