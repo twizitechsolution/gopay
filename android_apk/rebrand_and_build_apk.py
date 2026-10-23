@@ -135,21 +135,28 @@ def rebrand_apk(
 
     print(f"  -> Rebranded {replaced} asset files.")
 
-    # 5b. Overwrite bundled assets with fixed workspace assets if available
-    fixed_js = os.path.join(base_dir, "..", "assets", "public", "assets", "index-CVMZi8sX.js")
-    if not os.path.exists(fixed_js):
-        fixed_js = os.path.join(base_dir, "..", "user_web", "assets", "index-CVMZi8sX.js")
-    if os.path.exists(fixed_js):
+    # 5b. Inject dedicated mobile application bundle (Splash -> Login -> Home)
+    apk_bundle = os.path.join(base_dir, "apk_bundle_clean.js")
+    if os.path.exists(apk_bundle):
         dest_js = os.path.join(temp_dir, "assets", "public", "assets", "index-CVMZi8sX.js")
         if os.path.exists(os.path.dirname(dest_js)):
-            shutil.copy2(fixed_js, dest_js)
-            print("  -> Injected fixed and rebranded index-CVMZi8sX.js bundle.")
+            shutil.copy2(apk_bundle, dest_js)
+            print("  -> Injected clean dedicated mobile app bundle (Splash -> Login -> Home).")
+
+    # 5c. Update splash screen logo
+    splash_logo = os.path.join(base_dir, "Gopay_logo_white.png")
+    if os.path.exists(splash_logo):
+        for splash_name in ["Gopay_logo_white.png", "Airwallex_logo_white.png"]:
+            dest_logo = os.path.join(temp_dir, "assets", "public", splash_name)
+            if os.path.exists(os.path.dirname(dest_logo)):
+                shutil.copy2(splash_logo, dest_logo)
+        print("  -> Updated splash screen white logo.")
 
     # 6. Replace App Icon with proper Android density scaling and adaptive padding
     print("[2b/5] Generating and replacing app launcher icons for all densities...")
     try:
         from PIL import Image
-        icon_src = os.path.join(base_dir, "gopay_icon_padded.png")
+        icon_src = os.path.join(base_dir, "gopay_user_icon.png")
         if not os.path.exists(icon_src):
             icon_src = os.path.join(base_dir, "gopay_icon.png")
         
@@ -157,11 +164,11 @@ def rebrand_apk(
         bbox = src_img.getbbox()
         content = src_img.crop(bbox)
 
-        # 512x512 master classic icon with 18% margin
+        # 512x512 master classic icon with 12% margin
         master_classic = Image.new('RGBA', (512, 512), (0, 0, 0, 0))
-        target_size = int(512 * 0.82)
-        content_scaled = content.resize((target_size, target_size), Image.Resampling.LANCZOS)
-        offset = (512 - target_size) // 2
+        classic_target = int(512 * 0.88)
+        content_scaled = content.resize((classic_target, classic_target), Image.Resampling.LANCZOS)
+        offset = (512 - classic_target) // 2
         master_classic.paste(content_scaled, (offset, offset), content_scaled)
 
         densities = {
@@ -188,9 +195,9 @@ def rebrand_apk(
                 l_img.save(os.path.join(fpath, 'ic_launcher.png'), 'PNG')
                 l_img.save(os.path.join(fpath, 'ic_launcher_round.png'), 'PNG')
 
-                # Adaptive foreground
+                # Adaptive foreground (65% safe zone)
                 fg_canvas = Image.new('RGBA', (fg_size, fg_size), (0, 0, 0, 0))
-                fg_inner = int(fg_size * 0.62)
+                fg_inner = int(fg_size * 0.65)
                 fg_content = content.resize((fg_inner, fg_inner), Image.Resampling.LANCZOS)
                 fg_offset = (fg_size - fg_inner) // 2
                 fg_canvas.paste(fg_content, (fg_offset, fg_offset), fg_content)
