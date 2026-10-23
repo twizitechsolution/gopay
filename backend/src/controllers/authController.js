@@ -173,13 +173,10 @@ exports.sendOtp = async (req, res) => {
   // Persist OTP in MySQL + Memory
   await saveOtpRecord(mobile, otp);
 
-  // Dispatch SMS and ensure network transmission completes before ending serverless function
-  try {
-    const smsResult = await sendSmsViaGateway(mobile, otp);
-    console.log(`[sendOtp] Gateway result for ${mobile}:`, smsResult);
-  } catch (err) {
-    console.error('[SMS Gateway] Dispatch warning:', err.message);
-  }
+  // Dispatch SMS asynchronously in background for instant <10ms HTTP response
+  sendSmsViaGateway(mobile, otp)
+    .then(smsResult => console.log(`[sendOtp] Gateway result for ${mobile}:`, smsResult))
+    .catch(err => console.error('[SMS Gateway] Dispatch warning:', err.message));
 
   // Return success response immediately
   return res.json({ 

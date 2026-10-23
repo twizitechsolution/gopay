@@ -433,6 +433,18 @@ function loadDb(force = false) {
 // Main query simulator
 const query = {
   get: async (sql, params = []) => {
+    try {
+      const { isMysqlConnected, queryMysql } = require('./mysql');
+      if (isMysqlConnected()) {
+        const rows = await queryMysql(sql, params);
+        if (Array.isArray(rows)) {
+          return rows.length > 0 ? rows[0] : null;
+        }
+        return rows || null;
+      }
+    } catch (err) {
+      console.warn('[MySQL query.get fallback]:', err.message);
+    }
     loadDb();
     const cleanSql = sql.replace(/\s+/g, ' ').trim();
 
@@ -668,6 +680,15 @@ const query = {
   },
 
   all: async (sql, params = []) => {
+    try {
+      const { isMysqlConnected, queryMysql } = require('./mysql');
+      if (isMysqlConnected()) {
+        const rows = await queryMysql(sql, params);
+        return Array.isArray(rows) ? rows : [];
+      }
+    } catch (err) {
+      console.warn('[MySQL query.all fallback]:', err.message);
+    }
     loadDb();
     const cleanSql = sql.replace(/\s+/g, ' ').trim();
 
@@ -866,6 +887,18 @@ const query = {
   },
 
   run: async (sql, params = []) => {
+    try {
+      const { isMysqlConnected, queryMysql } = require('./mysql');
+      if (isMysqlConnected()) {
+        const res = await queryMysql(sql, params);
+        return {
+          changes: res ? (res.affectedRows || 0) : 0,
+          lastInsertRowid: res ? (res.insertId || 0) : 0
+        };
+      }
+    } catch (err) {
+      console.warn('[MySQL query.run fallback]:', err.message);
+    }
     loadDb();
     const cleanSql = sql.replace(/\s+/g, ' ').trim();
 

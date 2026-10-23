@@ -98,53 +98,34 @@ exports.changeAdminPassword = async (req, res) => {
 
 exports.getDashboardStats = async (req, res) => {
   try {
-    const cached = adminCache.get('stats');
-    if (cached) {
-      return res.status(200).json(cached);
-    }
-
-    const { supabase, isSupabaseConnected } = require('../supabase');
+    const { isMysqlConnected, fetchAllFromMysql, queryMysql } = require('../mysql');
     const { loadDb, dbData } = require('../db');
-    loadDb();
 
-    let totalUsers = (dbData.users || []).length;
-    let completedOrdersList = (dbData.orders || []).filter(o => o.status === 'Completed');
-    let pendingOrdersCount = (dbData.orders || []).filter(o => o.status === 'Confirming' || o.status === 'Pending').length;
-    let completedOrdersCount = completedOrdersList.length;
-    let canceledOrdersCount = (dbData.orders || []).filter(o => o.status === 'Canceled').length;
-    let withdrawTxns = (dbData.transactions || []).filter(t => t.type === 'Withdraw' && Number(t.amount) < 0);
-    const allProducts = dbData.products || [];
+    let allUsers = [];
+    let allOrders = [];
+    let withdrawTxns = [];
+    let allProducts = [];
 
-    if (isSupabaseConnected()) {
-      try {
-        const { fetchAll } = require('../supabase');
-        const [usersCountRes, ordersData, withdrawData, productsRes] = await Promise.all([
-          supabase.from('users').select('*', { count: 'exact', head: true }),
-          fetchAll('orders', 'status, amount, created_at', 'created_at', false, 10000),
-          fetchAll('withdrawals', 'amount, created_at', 'created_at', false, 5000),
-          supabase.from('products').select('*').limit(200)
-        ]);
-
-        if (usersCountRes && usersCountRes.count !== null && usersCountRes.count !== undefined) {
-          totalUsers = usersCountRes.count;
-        }
-        if (ordersData && ordersData.length > 0) {
-          const ords = ordersData;
-          completedOrdersList = ords.filter(o => o.status === 'Completed');
-          pendingOrdersCount = ords.filter(o => o.status === 'Confirming' || o.status === 'Pending').length;
-          completedOrdersCount = completedOrdersList.length;
-          canceledOrdersCount = ords.filter(o => o.status === 'Canceled').length;
-        }
-        if (withdrawData && withdrawData.length > 0) {
-          withdrawTxns = withdrawData;
-        }
-        if (productsRes.data && productsRes.data.length > 0) {
-          dbData.products = productsRes.data;
-        }
-      } catch (suErr) {
-        console.warn('[getDashboardStats] Supabase query warning:', suErr.message);
-      }
+    if (isMysqlConnected()) {
+      [allUsers, allOrders, withdrawTxns, allProducts] = await Promise.all([
+        fetchAllFromMysql('users'),
+        fetchAllFromMysql('orders'),
+        fetchAllFromMysql('withdrawals'),
+        fetchAllFromMysql('products')
+      ]);
+    } else {
+      loadDb();
+      allUsers = dbData.users || [];
+      allOrders = dbData.orders || [];
+      withdrawTxns = (dbData.transactions || []).filter(t => t.type === 'Withdraw' && Number(t.amount) < 0);
+      allProducts = dbData.products || [];
     }
+
+    let totalUsers = allUsers.length;
+    let completedOrdersList = allOrders.filter(o => o.status === 'Completed');
+    let pendingOrdersCount = allOrders.filter(o => o.status === 'Confirming' || o.status === 'Pending').length;
+    let completedOrdersCount = completedOrdersList.length;
+    let canceledOrdersCount = allOrders.filter(o => o.status === 'Canceled').length;
 
     const totalDeposits = completedOrdersList.reduce((sum, o) => sum + (Number(o.amount) || 0), 0);
     const totalVolume = totalDeposits;
@@ -212,34 +193,24 @@ exports.getDashboardStats = async (req, res) => {
 
 exports.getUsersList = async (req, res) => {
   try {
-    const cached = adminCache.get('users');
-    if (cached) {
-      return res.status(200).json(cached);
-    }
-
-    const { supabase, isSupabaseConnected } = require('../supabase');
+    const { isMysqlConnected, fetchAllFromMysql } = require('../mysql');
     const { loadDb, dbData } = require('../db');
-    loadDb();
 
-    let allUsers = dbData.users || [];
-    let withdrawTxns = (dbData.transactions || []).filter(w => w.type === 'Withdraw');
-    let allBanks = dbData.bank_accounts || [];
+    let allUsers = [];
+    let withdrawTxns = [];
+    let allBanks = [];
 
-    if (isSupabaseConnected()) {
-      try {
-        const { fetchAll } = require('../supabase');
-        const [usersData, txnsData, banksData] = await Promise.all([
-          fetchAll('users', 'id, uid, username, mobile, inr_balance, bcoin_balance, total_earnings, today_profit, is_blocked, created_at', 'id', false, 10000),
-          fetchAll('withdrawals', 'user_id, amount', 'id', false, 5000),
-          fetchAll('bank_accounts', 'user_id, bank_name, account_holder, account_number, ifsc_code, status', 'id', false, 5000)
-        ]);
-
-        if (usersData && usersData.length > 0) allUsers = usersData;
-        if (txnsData && txnsData.length > 0) withdrawTxns = txnsData;
-        if (banksData && banksData.length > 0) allBanks = banksData;
-      } catch (sErr) {
-        console.warn('[getUsersList] Supabase sync warning:', sErr.message);
-      }
+    if (isMysqlConnected()) {
+      [allUsers, withdrawTxns, allBanks] = await Promise.all([
+        fetchAllFromMysql('users'),
+        fetchAllFromMysql('withdrawals'),
+        fetchAllFromMysql('bank_accounts')
+      ]);
+    } else {
+      loadDb();
+      allUsers = dbData.users || [];
+      withdrawTxns = (dbData.transactions || []).filter(w => w.type === 'Withdraw');
+      allBanks = dbData.bank_accounts || [];
     }
 
     const withdrawalMap = {};

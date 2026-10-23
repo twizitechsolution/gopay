@@ -442,23 +442,17 @@ app.get('/api/admin/users', adminAuth, adminController.getUsersList);
 app.post('/api/admin/users/:id/toggle-block', adminAuth, adminController.toggleUserBlock);
 app.get('/api/admin/orders', adminAuth, async (req, res) => {
   try {
-    const adminCache = require('./cache');
-    const cached = adminCache.get('orders');
-    if (cached) {
-      return res.json(cached);
-    }
-
-    const { fetchAll, isSupabaseConnected } = require('./supabase');
+    const { isMysqlConnected, fetchAllFromMysql } = require('./mysql');
     const { loadDb, dbData } = require('./db');
     loadDb();
 
     let list = [];
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
         const [recentOrders, allUsersData, allBanksData] = await Promise.all([
-          fetchAll('orders', 'id, order_id, user_id, asset_type, amount, expected_income, quota, status, utr, receiver_id, withdrawal_id, timer_expiry, receiver_details, screenshot_path, created_at', 'created_at', false, 20000),
-          fetchAll('users', 'id, uid, mobile, username', 'id', false, 20000),
-          fetchAll('bank_accounts', '*', 'id', false, 10000)
+          fetchAllFromMysql('orders'),
+          fetchAllFromMysql('users'),
+          fetchAllFromMysql('bank_accounts')
         ]);
 
         const allOrders = recentOrders || [];
@@ -509,8 +503,8 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
             };
           });
         }
-      } catch (suErr) {
-        console.warn('[AdminOrders] Supabase live fetch failed, falling back to local query:', suErr.message);
+      } catch (err) {
+        console.warn('[AdminOrders] MySQL fetch error:', err.message);
       }
     }
 
@@ -693,19 +687,21 @@ app.delete('/api/admin/messages/:id', adminAuth, async (req, res) => {
 app.get('/api/admin/settings', adminAuth, async (req, res) => {
   try {
     loadDb();
-    try {
-      const { supabase, isSupabaseConnected } = require('./supabase');
-      if (isSupabaseConnected()) {
-        const { data } = await supabase.from('settings').select('*').eq('key', 'config').maybeSingle();
-        if (data && data.value) {
-          dbData.settings = { ...(dbData.settings || {}), ...data.value };
+    const { isMysqlConnected, fetchAllFromMysql, persistToMysql } = require('./mysql');
+    if (isMysqlConnected()) {
+      try {
+        const rows = await fetchAllFromMysql('settings');
+        const cfg = rows.find(r => r.key === 'config');
+        if (cfg && cfg.value) {
+          const parsed = typeof cfg.value === 'string' ? JSON.parse(cfg.value) : cfg.value;
+          dbData.settings = { ...(dbData.settings || {}), ...parsed };
         }
-      }
-    } catch (_) {}
+      } catch (e) {}
+    }
     let config = { ...(dbData.settings || {}) };
     config.min_order_amount = Number(config.min_order_amount) > 0 ? Number(config.min_order_amount) : 500;
     config.max_order_amount = Number(config.max_order_amount) > 0 ? Number(config.max_order_amount) : 100000;
-    config.default_ref_code = config.default_ref_code || 'tp3340vnxr';
+    config.default_ref_code = config.default_ref_code || 'admin001';
     return res.json({ success: true, settings: config });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -716,7 +712,6 @@ app.post('/api/admin/settings', adminAuth, async (req, res) => {
   try {
     const { level1_commission, level2_commission, level3_commission, telegram_link, winpey_api_key, winpey_api_secret, payment_mode, upi_ids, default_ref_code, min_order_amount, max_order_amount } = req.body;
     
-    // Update memory & database settings
     dbData.settings = dbData.settings || {};
     if (default_ref_code !== undefined) {
       dbData.settings.default_ref_code = String(default_ref_code).trim();
@@ -736,18 +731,13 @@ app.post('/api/admin/settings', adminAuth, async (req, res) => {
     
     saveDb();
 
-    // Direct Supabase sync if connected
-    try {
-      const { supabase, isSupabaseConnected } = require('./supabase');
-      if (isSupabaseConnected()) {
-        await supabase.from('settings').upsert({
-          key: 'config',
-          value: dbData.settings,
-          updated_at: new Date().toISOString()
-        });
-      }
-    } catch (sErr) {
-      console.error('[Settings] Supabase sync error:', sErr.message);
+    // Persist directly to MySQL in real-time
+    const { isMysqlConnected, persistToMysql } = require('./mysql');
+    if (isMysqlConnected()) {
+      await persistToMysql('settings', 'upsert', {
+        key: 'config',
+        value: JSON.stringify(dbData.settings)
+      }, 'key');
     }
 
     return res.json({ success: true, message: 'Settings updated successfully!', settings: dbData.settings });
