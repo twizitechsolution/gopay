@@ -18,6 +18,7 @@ const orderController = require('./controllers/orderController');
 const authMiddleware = require('./middleware/authMiddleware');
 const adminAuth = require('./middleware/adminAuth');
 const adminController = require('./controllers/adminController');
+const adminCache = require('./cache');
 const { sendPushNotification } = require('./firebase');
 
 const app = express();
@@ -540,7 +541,7 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
     }
 
     const responseData = { success: true, orders: list };
-    adminCache.set('orders', responseData, 30000); // 30s cache
+    try { if (adminCache && adminCache.set) adminCache.set('orders', responseData, 30000); } catch (_) {}
     return res.json(responseData);
   } catch (err) {
     return res.status(500).json({ error: err.message });
