@@ -4,8 +4,8 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 
 const bundledDbPath = path.join(__dirname, '../data/database.json');
-const dataDir = process.env.VERCEL ? '/tmp/data' : path.join(__dirname, '../data');
-const dbPath = process.env.DATABASE_PATH || (process.env.VERCEL ? '/tmp/database.json' : path.join(dataDir, 'database.json'));
+const dataDir = process.env.DATA_DIR || path.join(__dirname, '../data');
+const dbPath = process.env.DATABASE_PATH || path.join(dataDir, 'database.json');
 
 // Ensure database parent directory exists safely
 const dbDir = path.dirname(dbPath);
@@ -13,19 +13,7 @@ try {
   if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
   }
-} catch (err) {
-  // Ignore in read-only serverless lambdas
-}
-
-// Seed /tmp/database.json on Vercel from bundled database.json immediately
-if (process.env.VERCEL && !fs.existsSync(dbPath) && fs.existsSync(bundledDbPath)) {
-  try {
-    fs.copyFileSync(bundledDbPath, dbPath);
-    console.log('[DB] Successfully seeded /tmp/database.json from bundled database.json');
-  } catch (err) {
-    console.error('[DB] Failed to copy bundled database.json:', err.message);
-  }
-}
+} catch (err) {}
 
 // In-memory representation of our database tables
 let dbData = {
@@ -59,76 +47,20 @@ let idTrackers = {
   disputes: 0
 };
 
-// Supabase Table Columns Schema definitions for strict validation
-const ALLOWED_COLUMNS = {
-  users: ['id', 'uid', 'mobile', 'username', 'password_hash', 'pin', 'ref_code', 'parent_id', 'inr_balance', 'bcoin_balance', 'usdt_balance', 'total_earnings', 'today_profit', 'yesterday_profit', 'is_blocked', 'fcm_tokens', 'created_at'],
-  orders: ['id', 'order_id', 'user_id', 'asset_type', 'amount', 'expected_income', 'quota', 'status', 'utr', 'receiver_id', 'withdrawal_id', 'timer_expiry', 'receiver_details', 'screenshot_path', 'created_at'],
-  bank_accounts: ['id', 'user_id', 'bank_name', 'account_holder', 'account_number', 'ifsc_code', 'status', 'created_at'],
-  transactions: ['id', 'user_id', 'type', 'amount', 'balance_after', 'description', 'created_at'],
-  withdrawals: ['id', 'user_id', 'amount', 'amount_pending', 'status', 'bank_account_id', 'utr', 'txid', 'created_at'],
-  settings: ['key', 'value', 'updated_at'],
-  products: ['id', 'name', 'amount', 'income', 'quota', 'color', 'type', 'percent', 'created_at'],
-  disputes: ['id', 'order_id', 'raiser_id', 'reason', 'proof_path', 'status', 'created_at']
-};
-
-function sanitizeForSupabase(table, record) {
-  const allowed = ALLOWED_COLUMNS[table];
-  if (!allowed) return { ...record };
-  const clean = {};
-  for (const col of allowed) {
-    if (record[col] !== undefined) {
-      clean[col] = record[col];
-    }
-  }
-  return clean;
-}
-
-// Single Source of Truth: Immediate write-through persistence to Database (MySQL / Supabase)
-async function persistToSupabase(table, record, operation = 'upsert', matchField = 'id') {
-  // 1. Primary: Immediate write to MySQL if connected
+// Unified Database Persistence (100% MySQL aaPanel Native)
+async function persistToDb(table, record, operation = 'upsert', matchField = 'id') {
   try {
     const { isMysqlConnected, persistToMysql } = require('./mysql');
-    if (isMysqlConnected()) {
+    if (isMysqlConnected() && record) {
       await persistToMysql(table, record, operation, matchField);
-      return;
     }
-  } catch (mErr) {}
-
-  // 2. Secondary fallback: Supabase Cloud
-  try {
-    if (!ALLOWED_COLUMNS[table]) return;
-    const { supabase, isSupabaseConnected } = require('./supabase');
-    if (!isSupabaseConnected() || !record) return;
-
-    const clean = sanitizeForSupabase(table, record);
-    if (!clean || Object.keys(clean).length === 0) return;
-
-    if (operation === 'insert' || operation === 'upsert') {
-      const { error } = await supabase.from(table).upsert(clean);
-      if (error) {
-        console.error(`[Supabase ${operation} Error] table ${table}:`, error.message);
-      }
-    } else if (operation === 'update') {
-      const matchVal = record[matchField];
-      if (matchVal === undefined || matchVal === null) return;
-      const { error } = await supabase.from(table).update(clean).eq(matchField, matchVal);
-      if (error) {
-        console.error(`[Supabase update Error] table ${table} on ${matchField}=${matchVal}:`, error.message);
-      }
-    } else if (operation === 'delete') {
-      const matchVal = record[matchField];
-      if (matchVal === undefined || matchVal === null) return;
-      const { error } = await supabase.from(table).delete().eq(matchField, matchVal);
-      if (error) {
-        console.error(`[Supabase delete Error] table ${table} on ${matchField}=${matchVal}:`, error.message);
-      }
-    }
-  } catch (err) {
-    console.error(`[Supabase Sync Exception] ${table}:`, err.message);
+  } catch (mErr) {
+    console.error(`[MySQL Persist Error] ${table}:`, mErr.message);
   }
 }
+const persistToSupabase = persistToDb; // Backwards-compatible alias
 
-// Save helper - Writes local disk cache and syncs configuration to Supabase
+
 function saveDb(entity = null) {
   if (!isDbLoaded) {
     loadDb();
@@ -140,31 +72,29 @@ function saveDb(entity = null) {
   try {
     fs.writeFileSync(dbPath, JSON.stringify({ dbData, idTrackers }, null, 2), 'utf8');
   } catch (err) {
-    // Non-blocking fallback for read-only environments like Vercel Serverless
+    // Disk write fallback
   }
 
-  // If a specific entity was passed, persist it to Supabase immediately
+  
   if (entity && entity.table && entity.record) {
-    persistToSupabase(entity.table, entity.record, entity.operation || 'upsert', entity.matchField || 'id');
+    persistToDb(entity.table, entity.record, entity.operation || 'upsert', entity.matchField || 'id');
   }
 
-  // Always keep settings & admin configuration saved in Supabase
+  // Always keep settings & admin configuration saved in MySQL
   try {
-    const { supabase, isSupabaseConnected } = require('./supabase');
-    if (isSupabaseConnected()) {
+    const { isMysqlConnected, persistToMysql } = require('./mysql');
+    if (isMysqlConnected()) {
       if (dbData.settings) {
-        supabase.from('settings').upsert({
+        persistToMysql('settings', {
           key: 'config',
-          value: dbData.settings,
-          updated_at: new Date().toISOString()
-        }).then(() => {}, () => {});
+          value: JSON.stringify(dbData.settings)
+        }, 'upsert', 'key').catch(() => {});
       }
       if (dbData.admin) {
-        supabase.from('settings').upsert({
+        persistToMysql('settings', {
           key: 'admin',
-          value: dbData.admin,
-          updated_at: new Date().toISOString()
-        }).then(() => {}, () => {});
+          value: JSON.stringify(dbData.admin)
+        }, 'upsert', 'key').catch(() => {});
       }
     }
   } catch (e) {}
@@ -516,13 +446,11 @@ const query = {
       let user = dbData.users.find(u => u.uid === params[0]);
       if (!user) {
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data } = await supabase.from('users').select('id, uid').eq('uid', params[0]).maybeSingle();
-            if (data) {
-              user = data;
-            }
-          }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+    const data = await fetchOneFromMysql('users', 'uid', params[0]);
+    if (data) user = data;
+  }
         } catch (e) {}
       }
       return user ? { id: user.id } : null;
@@ -533,13 +461,11 @@ const query = {
       let user = dbData.users.find(u => u.ref_code === params[0]);
       if (!user) {
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data } = await supabase.from('users').select('id, ref_code').eq('ref_code', params[0]).maybeSingle();
-            if (data) {
-              user = data;
-            }
-          }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+    const data = await fetchOneFromMysql('users', 'ref_code', params[0]);
+    if (data) user = data;
+  }
         } catch (e) {}
       }
       return user ? { id: user.id } : null;
@@ -550,14 +476,11 @@ const query = {
       let user = dbData.users.find(u => u.mobile === params[0]);
       if (!user) {
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data } = await supabase.from('users').select('*').eq('mobile', params[0]).maybeSingle();
-            if (data) {
-              user = data;
-              dbData.users.push(data);
-            }
-          }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+    const data = await fetchOneFromMysql('users', 'mobile', params[0]);
+    if (data) { user = data; dbData.users.push(data); }
+  }
         } catch (e) {}
       }
       return user ? { ...user } : null;
@@ -568,14 +491,11 @@ const query = {
       let user = dbData.users.find(u => u.id == params[0]);
       if (!user) {
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data } = await supabase.from('users').select('*').eq('id', params[0]).maybeSingle();
-            if (data) {
-              user = data;
-              dbData.users.push(data);
-            }
-          }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+    const data = await fetchOneFromMysql('users', 'id', params[0]);
+    if (data) { user = data; dbData.users.push(data); }
+  }
         } catch (e) {}
       }
       return user ? { ...user } : null;
@@ -633,11 +553,11 @@ const query = {
     // 12. SELECT * FROM settings LIMIT 1
     if (cleanSql.includes('FROM settings')) {
       try {
-        const { supabase, isSupabaseConnected } = require('./supabase');
-        if (isSupabaseConnected()) {
-          const { data } = await supabase.from('settings').select('*').eq('key', 'config').maybeSingle();
+        const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+        if (isMysqlConnected()) {
+          const data = await fetchOneFromMysql('settings', 'key', 'config');
           if (data && data.value) {
-            dbData.settings = { ...(dbData.settings || {}), ...data.value };
+            dbData.settings = { ...(dbData.settings || {}), ...(typeof data.value === 'string' ? JSON.parse(data.value) : data.value) };
           }
         }
       } catch (_) {}
@@ -652,13 +572,10 @@ const query = {
       let ord = dbData.orders.find(o => o.order_id === params[0]);
       if (!ord) {
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data } = await supabase.from('orders').select('*').eq('order_id', params[0]).maybeSingle();
-            if (data) {
-              ord = data;
-              dbData.orders.push(data);
-            }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+            const data = await fetchOneFromMysql('orders', 'order_id', params[0]);
+            if (data) { ord = data; dbData.orders.push(data); }
           }
         } catch (e) {}
       }
@@ -736,13 +653,10 @@ const query = {
       let w = (dbData.withdrawals || []).find(x => x.id == params[0]);
       if (!w) {
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data } = await supabase.from('withdrawals').select('*').eq('id', params[0]).maybeSingle();
-            if (data) {
-              w = data;
-              dbData.withdrawals.push(data);
-            }
+          const { isMysqlConnected, fetchOneFromMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+            const data = await fetchOneFromMysql('withdrawals', 'id', params[0]);
+            if (data) w = data;
           }
         } catch (e) {}
       }
@@ -762,19 +676,10 @@ const query = {
       if (cleanSql.includes('user_id = ?')) {
         const uId = params[0];
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data: suW } = await supabase.from('withdrawals').select('*').eq('user_id', uId);
-            if (suW && suW.length > 0) {
-              suW.forEach(sw => {
-                const existingIdx = dbData.withdrawals.findIndex(w => w.id === sw.id);
-                if (existingIdx !== -1) {
-                  dbData.withdrawals[existingIdx] = { ...dbData.withdrawals[existingIdx], ...sw };
-                } else {
-                  dbData.withdrawals.push(sw);
-                }
-              });
-            }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+            const suW = await fetchWhereFromMysql('withdrawals', 'user_id', uId);
+            if (suW && suW.length > 0) return suW;
           }
         } catch (e) {}
       }
@@ -820,36 +725,18 @@ const query = {
       if (cleanSql.includes('user_id = ?')) {
         const uId = params[0];
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data: suOrders } = await supabase.from('orders').select('*').eq('user_id', uId);
-            if (suOrders && suOrders.length > 0) {
-              suOrders.forEach(so => {
-                const existingIdx = dbData.orders.findIndex(o => o.order_id === so.order_id);
-                if (existingIdx !== -1) {
-                  dbData.orders[existingIdx] = { ...dbData.orders[existingIdx], ...so };
-                } else {
-                  dbData.orders.push(so);
-                }
-              });
-            }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+            const suOrders = await fetchWhereFromMysql('orders', 'user_id', uId);
+            if (suOrders && suOrders.length > 0) return suOrders;
           }
         } catch (e) {}
       } else {
         try {
-          const { supabase, isSupabaseConnected } = require('./supabase');
-          if (isSupabaseConnected()) {
-            const { data: suRecent } = await supabase.from('orders').select('*').order('id', { ascending: false }).limit(200);
-            if (suRecent && suRecent.length > 0) {
-              suRecent.forEach(so => {
-                const existingIdx = dbData.orders.findIndex(o => o.order_id === so.order_id);
-                if (existingIdx !== -1) {
-                  dbData.orders[existingIdx] = { ...dbData.orders[existingIdx], ...so };
-                } else {
-                  dbData.orders.push(so);
-                }
-              });
-            }
+          const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+          if (isMysqlConnected()) {
+            const suRecent = await fetchAllFromMysql('orders', 200);
+            if (suRecent && suRecent.length > 0) return suRecent;
           }
         } catch (e) {}
       }
@@ -885,19 +772,10 @@ const query = {
     if (cleanSql.startsWith('SELECT * FROM transactions WHERE user_id = ?')) {
       const uId = params[0];
       try {
-        const { supabase, isSupabaseConnected } = require('./supabase');
-        if (isSupabaseConnected()) {
-          const { data: suTxns } = await supabase.from('transactions').select('*').eq('user_id', uId);
-          if (suTxns && suTxns.length > 0) {
-            suTxns.forEach(st => {
-              const existingIdx = dbData.transactions.findIndex(t => t.id === st.id);
-              if (existingIdx !== -1) {
-                dbData.transactions[existingIdx] = { ...dbData.transactions[existingIdx], ...st };
-              } else {
-                dbData.transactions.push(st);
-              }
-            });
-          }
+        const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+        if (isMysqlConnected()) {
+          const suTxns = await fetchWhereFromMysql('transactions', 'user_id', uId);
+          if (suTxns && suTxns.length > 0) return suTxns;
         }
       } catch (e) {}
       let txs = dbData.transactions.filter(t => t.user_id == uId);
@@ -938,19 +816,10 @@ const query = {
     // 8. SELECT id, uid, mobile, inr_balance, bcoin_balance, total_earnings, today_profit, created_at FROM users ORDER BY id DESC
     if (cleanSql.includes('FROM users ORDER BY id DESC') || cleanSql.includes('FROM users ORDER BY id desc')) {
       try {
-        const { supabase, isSupabaseConnected } = require('./supabase');
-        if (isSupabaseConnected()) {
-          const { data: suRecentUsers } = await supabase.from('users').select('*').order('id', { ascending: false }).limit(300);
-          if (suRecentUsers && suRecentUsers.length > 0) {
-            suRecentUsers.forEach(su => {
-              const existingIdx = dbData.users.findIndex(u => u.id === su.id);
-              if (existingIdx !== -1) {
-                dbData.users[existingIdx] = { ...dbData.users[existingIdx], ...su };
-              } else {
-                dbData.users.push(su);
-              }
-            });
-          }
+        const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+        if (isMysqlConnected()) {
+          const suRecentUsers = await fetchAllFromMysql('users', 300);
+          if (suRecentUsers && suRecentUsers.length > 0) return suRecentUsers;
         }
       } catch (e) {}
       const mapped = dbData.users.map(u => ({
@@ -1020,16 +889,6 @@ const query = {
         let record = { id: newId, created_at: new Date().toISOString() };
 
         if (table === 'users') {
-          // Sync idTracker with Supabase max ID so we never collide or duplicate
-          try {
-            const { supabase, isSupabaseConnected } = require('./supabase');
-            if (isSupabaseConnected()) {
-              const { data: maxRow } = await supabase.from('users').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-              if (maxRow && maxRow.id >= idTrackers.users) {
-                idTrackers.users = maxRow.id;
-              }
-            }
-          } catch (e) {}
           idTrackers.users++;
           const newUserId = idTrackers.users;
 
@@ -1076,15 +935,9 @@ const query = {
           }
         } 
         else if (table === 'orders') {
-          try {
-            const { supabase, isSupabaseConnected } = require('./supabase');
-            if (isSupabaseConnected()) {
-              const { data: maxRow } = await supabase.from('orders').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-              if (maxRow && maxRow.id >= idTrackers.orders) {
-                idTrackers.orders = maxRow.id;
-              }
-            }
-          } catch (e) {}
+
+
+            
           idTrackers.orders++;
           const newOrderId = idTrackers.orders;
           record = {
@@ -1125,15 +978,9 @@ const query = {
           }
         }
         else if (table === 'transactions') {
-          try {
-            const { supabase, isSupabaseConnected } = require('./supabase');
-            if (isSupabaseConnected()) {
-              const { data: maxRow } = await supabase.from('transactions').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-              if (maxRow && maxRow.id >= idTrackers.transactions) {
-                idTrackers.transactions = maxRow.id;
-              }
-            }
-          } catch (e) {}
+
+
+            
           idTrackers.transactions++;
           record.id = idTrackers.transactions;
 
@@ -1255,7 +1102,7 @@ const query = {
 
         dbData[table].push(record);
         saveDb();
-        await persistToSupabase(table, record, 'upsert', table === 'orders' ? 'order_id' : 'id');
+        await persistToDb(table, record, 'upsert', table === 'orders' ? 'order_id' : 'id');
         return { lastID: record.id || newId, changes: 1 };
       }
     }
@@ -1271,7 +1118,7 @@ const query = {
           user.is_blocked = Boolean(params[0]);
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
 
@@ -1282,7 +1129,7 @@ const query = {
           user.password_hash = params[0];
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
       // 1b. UPDATE users SET bcoin_balance = ? WHERE id = ?
@@ -1292,7 +1139,7 @@ const query = {
           user.bcoin_balance = Number(params[0]);
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
       
@@ -1303,7 +1150,7 @@ const query = {
           user.pin = params[0];
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
 
@@ -1325,7 +1172,7 @@ const query = {
           user.bcoin_balance += 20;
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
 
@@ -1336,7 +1183,7 @@ const query = {
           user.inr_balance += 60;
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
 
@@ -1347,7 +1194,7 @@ const query = {
           user.username = params[0];
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
 
@@ -1369,7 +1216,7 @@ const query = {
           acc.status = params[0];
           changes = 1;
           saveDb();
-          await persistToSupabase('bank_accounts', acc, 'update', 'id');
+          await persistToDb('bank_accounts', acc, 'update', 'id');
         }
       }
 
@@ -1397,13 +1244,10 @@ const query = {
         let ord = dbData.orders.find(o => o.order_id === orderIdParam);
         if (!ord) {
           try {
-            const { supabase, isSupabaseConnected } = require('./supabase');
-            if (isSupabaseConnected()) {
-              const { data } = await supabase.from('orders').select('*').eq('order_id', orderIdParam).maybeSingle();
-              if (data) {
-                ord = data;
-                dbData.orders.push(data);
-              }
+            const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+            if (isMysqlConnected()) {
+              const data = await fetchOneFromMysql('orders', 'order_id', orderIdParam);
+              if (data) { ord = data; dbData.orders.push(data); }
             }
           } catch (e) {}
         }
@@ -1412,7 +1256,7 @@ const query = {
           if (utrParam) ord.utr = utrParam;
           changes = 1;
           saveDb();
-          await persistToSupabase('orders', ord, 'update', 'order_id');
+          await persistToDb('orders', ord, 'update', 'order_id');
         }
       }
 
@@ -1422,13 +1266,10 @@ const query = {
         let ord = dbData.orders.find(o => o.order_id === orderIdParam);
         if (!ord) {
           try {
-            const { supabase, isSupabaseConnected } = require('./supabase');
-            if (isSupabaseConnected()) {
-              const { data } = await supabase.from('orders').select('*').eq('order_id', orderIdParam).maybeSingle();
-              if (data) {
-                ord = data;
-                dbData.orders.push(data);
-              }
+            const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+            if (isMysqlConnected()) {
+              const data = await fetchOneFromMysql('orders', 'order_id', orderIdParam);
+              if (data) { ord = data; dbData.orders.push(data); }
             }
           } catch (e) {}
         }
@@ -1436,7 +1277,7 @@ const query = {
           ord.status = 'Canceled';
           changes = 1;
           saveDb();
-          await persistToSupabase('orders', ord, 'update', 'order_id');
+          await persistToDb('orders', ord, 'update', 'order_id');
         }
       }
 
@@ -1445,13 +1286,10 @@ const query = {
         let ord = dbData.orders.find(o => o.order_id === params[1]);
         if (!ord) {
           try {
-            const { supabase, isSupabaseConnected } = require('./supabase');
-            if (isSupabaseConnected()) {
-              const { data } = await supabase.from('orders').select('*').eq('order_id', params[1]).maybeSingle();
-              if (data) {
-                ord = data;
-                dbData.orders.push(data);
-              }
+            const { isMysqlConnected, fetchOneFromMysql, fetchAllFromMysql, persistToMysql } = require('./mysql');
+            if (isMysqlConnected()) {
+              const data = await fetchOneFromMysql('orders', 'order_id', params[1]);
+              if (data) { ord = data; dbData.orders.push(data); }
             }
           } catch (e) {}
         }
@@ -1459,7 +1297,7 @@ const query = {
           ord.utr = params[0];
           changes = 1;
           saveDb();
-          await persistToSupabase('orders', ord, 'update', 'order_id');
+          await persistToDb('orders', ord, 'update', 'order_id');
         }
       }
 
@@ -1472,7 +1310,7 @@ const query = {
           user.today_profit = Number(params[2]);
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
 
@@ -1486,7 +1324,7 @@ const query = {
           user.today_profit = Number(params[3]);
           changes = 1;
           saveDb();
-          await persistToSupabase('users', user, 'update', 'id');
+          await persistToDb('users', user, 'update', 'id');
         }
       }
 
@@ -1503,7 +1341,7 @@ const query = {
           prod.percent = params[6];
           changes = 1;
           saveDb();
-          await persistToSupabase('products', prod, 'update', 'id');
+          await persistToDb('products', prod, 'update', 'id');
         }
       }
 
@@ -1517,7 +1355,7 @@ const query = {
           }
           changes = 1;
           saveDb();
-          await persistToSupabase('withdrawals', w, 'update', 'id');
+          await persistToDb('withdrawals', w, 'update', 'id');
         }
       }
 
@@ -1528,7 +1366,7 @@ const query = {
           w.status = params[0];
           changes = 1;
           saveDb();
-          await persistToSupabase('withdrawals', w, 'update', 'id');
+          await persistToDb('withdrawals', w, 'update', 'id');
         }
       }
 
@@ -1547,7 +1385,7 @@ const query = {
         const changes = prevLength - dbData.bank_accounts.length;
         if (changes > 0) {
           saveDb();
-          await persistToSupabase('bank_accounts', { id: targetId }, 'delete', 'id');
+          await persistToDb('bank_accounts', { id: targetId }, 'delete', 'id');
         }
         return { changes };
       }
@@ -1571,7 +1409,7 @@ const query = {
         const changes = prevLength - dbData.products.length;
         if (changes > 0) {
           saveDb();
-          await persistToSupabase('products', { id: targetId }, 'delete', 'id');
+          await persistToDb('products', { id: targetId }, 'delete', 'id');
         }
         return { changes };
       }
@@ -1604,7 +1442,7 @@ const query = {
   }
 };
 
-// Seed script wrapping & Supabase Single-Source-of-Truth Hydration
+
 async function initDb() {
   loadDb();
 
@@ -1653,6 +1491,22 @@ async function initDb() {
         idTrackers.disputes = Math.max(idTrackers.disputes || 0, ...myDisputes.map(d => d.id || 0));
       }
 
+      const mySettings = await fetchAllFromMysql('settings');
+      if (mySettings && mySettings.length > 0) {
+        const configRow = mySettings.find(s => s.key === 'config');
+        if (configRow && configRow.value) {
+          try {
+            dbData.settings = { ...(dbData.settings || {}), ...(typeof configRow.value === 'string' ? JSON.parse(configRow.value) : configRow.value) };
+          } catch(e) {}
+        }
+        const adminRow = mySettings.find(s => s.key === 'admin');
+        if (adminRow && adminRow.value) {
+          try {
+            dbData.admin = { ...(dbData.admin || {}), ...(typeof adminRow.value === 'string' ? JSON.parse(adminRow.value) : adminRow.value) };
+          } catch(e) {}
+        }
+      }
+
       console.log(`[DB] MySQL connected & synced successfully. (${dbData.users.length} users, ${dbData.orders.length} orders)`);
       return;
     }
@@ -1660,94 +1514,7 @@ async function initDb() {
     console.warn('[DB] MySQL init check skipped:', mErr.message);
   }
 
-  // Connect & Sync with Supabase Cloud Database (Primary & Single Source of Truth)
-  try {
-    const { supabase, isSupabaseConnected } = require('./supabase');
-    if (isSupabaseConnected()) {
-      console.log('[DB] Connecting to Supabase Cloud Database (Single Source of Truth)...');
-
-      async function fetchAllFromSupabase(table, limit = 500) {
-        try {
-          const { data, error } = await supabase.from(table).select('*').order('id', { ascending: false }).limit(limit);
-          if (error) {
-            console.error(`[DB] Error fetching ${table} from Supabase:`, error.message);
-            return [];
-          }
-          return data || [];
-        } catch (e) {
-          return [];
-        }
-      }
-
-      const [suUsers, suOrders, suWithdrawals, suTransactions, suBankAccounts, suProducts, suDisputes] = await Promise.all([
-        fetchAllFromSupabase('users'),
-        fetchAllFromSupabase('orders'),
-        fetchAllFromSupabase('withdrawals'),
-        fetchAllFromSupabase('transactions'),
-        fetchAllFromSupabase('bank_accounts'),
-        fetchAllFromSupabase('products'),
-        fetchAllFromSupabase('disputes')
-      ]);
-
-      if (suUsers.length > 0) {
-        dbData.users = suUsers;
-        idTrackers.users = Math.max(idTrackers.users || 0, ...suUsers.map(u => u.id || 0));
-      }
-      if (suOrders.length > 0) {
-        dbData.orders = suOrders;
-        idTrackers.orders = Math.max(idTrackers.orders || 0, ...suOrders.map(o => o.id || 0));
-      }
-      if (suWithdrawals.length > 0) {
-        dbData.withdrawals = suWithdrawals;
-        idTrackers.withdrawals = Math.max(idTrackers.withdrawals || 0, ...suWithdrawals.map(w => w.id || 0));
-      }
-      if (suTransactions.length > 0) {
-        dbData.transactions = suTransactions;
-        idTrackers.transactions = Math.max(idTrackers.transactions || 0, ...suTransactions.map(t => t.id || 0));
-      }
-      if (suBankAccounts.length > 0) {
-        dbData.bank_accounts = suBankAccounts;
-        idTrackers.bank_accounts = Math.max(idTrackers.bank_accounts || 0, ...suBankAccounts.map(b => b.id || 0));
-      }
-      if (suProducts.length > 0) {
-        dbData.products = suProducts;
-        idTrackers.products = Math.max(idTrackers.products || 0, ...suProducts.map(p => p.id || 0));
-      }
-      if (suDisputes.length > 0) {
-        dbData.disputes = suDisputes;
-        idTrackers.disputes = Math.max(idTrackers.disputes || 0, ...suDisputes.map(d => d.id || 0));
-      }
-
-      const { data: suSettings } = await supabase.from('settings').select('*');
-      if (suSettings && suSettings.length > 0) {
-        const configRow = suSettings.find(s => s.key === 'config');
-        if (configRow && configRow.value) {
-          dbData.settings = { ...(dbData.settings || {}), ...configRow.value };
-        }
-        const adminRow = suSettings.find(s => s.key === 'admin');
-        if (adminRow && adminRow.value) {
-          dbData.admin = { ...(dbData.admin || {}), ...adminRow.value };
-        } else {
-          await supabase.from('settings').upsert({
-            key: 'admin',
-            value: dbData.admin,
-            updated_at: new Date().toISOString()
-          });
-        }
-      }
-
-      isDbLoaded = true;
-
-      // Sync hydrated in-memory state to local disk cache for instant warm start
-      try {
-        fs.writeFileSync(dbPath, JSON.stringify({ dbData, idTrackers }, null, 2), 'utf8');
-      } catch (err) {}
-
-      console.log(`[DB] Supabase single-source sync completed: ${dbData.users.length} users, ${dbData.orders.length} orders, ${dbData.withdrawals.length} withdrawals, ${dbData.transactions.length} transactions, ${dbData.bank_accounts.length} banks.`);
-    }
-  } catch (e) {
-    console.error('[DB] Supabase sync error:', e.message);
-  }
+  
 
   // Initialize arrays to prevent runtime errors
   dbData.products = dbData.products || [];
@@ -1831,23 +1598,7 @@ async function saveBase64File(base64Str, prefix) {
 
     const filename = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 1000)}.${ext}`;
 
-    // 1. Try Supabase Storage upload first
-    try {
-      const { supabase, isSupabaseConnected } = require('./supabase');
-      if (isSupabaseConnected()) {
-        const { data: upData, error: upErr } = await supabase.storage
-          .from('screenshots')
-          .upload(filename, buffer, { contentType: type, upsert: true });
-        if (!upErr && upData) {
-          const { data: pData } = supabase.storage.from('screenshots').getPublicUrl(filename);
-          if (pData && pData.publicUrl) {
-            return pData.publicUrl;
-          }
-        }
-      }
-    } catch (_) {}
-
-    const uploadsDir = process.env.VERCEL ? '/tmp/uploads' : path.join(__dirname, '../public/uploads');
+    const uploadsDir = path.join(__dirname, '../public/uploads');
     try {
       if (!fs.existsSync(uploadsDir)) {
         fs.mkdirSync(uploadsDir, { recursive: true });
@@ -1876,8 +1627,7 @@ module.exports = {
   idTrackers,
   saveDb,
   loadDb,
-  persistToSupabase,
-  sanitizeForSupabase,
+  persistToDb,
   saveBase64File
-};
+ };
 

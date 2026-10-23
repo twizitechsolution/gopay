@@ -3,18 +3,10 @@ const { query } = require('../db');
 exports.getProfile = async (req, res) => {
   const userId = req.user.id;
   try {
-    const { supabase, isSupabaseConnected } = require('../supabase');
-    let user = null;
-    if (isSupabaseConnected()) {
-      const { data } = await supabase.from('users').select('id, uid, username, mobile, inr_balance, bcoin_balance, usdt_balance, total_earnings, today_profit, yesterday_profit, ref_code, pin, is_blocked').eq('id', userId).maybeSingle();
-      user = data;
-    }
-    if (!user) {
-      user = await query.get(
-        'SELECT id, uid, username, mobile, inr_balance, bcoin_balance, usdt_balance, total_earnings, today_profit, yesterday_profit, ref_code, pin FROM users WHERE id = ?',
-        [userId]
-      );
-    }
+    const user = await query.get(
+      'SELECT id, uid, username, mobile, inr_balance, bcoin_balance, usdt_balance, total_earnings, today_profit, yesterday_profit, ref_code, pin, is_blocked FROM users WHERE id = ?',
+      [userId]
+    );
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }

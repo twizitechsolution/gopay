@@ -1,4 +1,4 @@
-const { query, dbData, idTrackers, saveDb, loadDb, persistToSupabase } = require('../db');
+const { query, dbData, idTrackers, saveDb, loadDb, persistToDb } = require('../db');
 
 // Helper to generate custom order IDs: gn/gu + YYYYMMDDHHMMSS + 6-digit uppercase hex
 function generateOrderId(prefix) {
@@ -156,11 +156,12 @@ exports.getPaymentQuote = async (req, res) => {
   // Enforce Admin configured Min / Max order limits
   loadDb();
   try {
-    const { supabase, isSupabaseConnected } = require('../supabase');
-    if (isSupabaseConnected()) {
-      const { data } = await supabase.from('settings').select('*').eq('key', 'config').maybeSingle();
-      if (data && data.value) {
-        dbData.settings = { ...(dbData.settings || {}), ...data.value };
+    const { isMysqlConnected, fetchOneFromMysql } = require('../mysql');
+    if (isMysqlConnected()) {
+      const row = await fetchOneFromMysql('settings', 'key', 'config');
+      if (row && row.value) {
+        const val = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+        dbData.settings = { ...(dbData.settings || {}), ...val };
       }
     }
   } catch (_) {}
@@ -308,11 +309,11 @@ exports.getPaymentQuote = async (req, res) => {
       receiverDetails
     });
 
-    // Also persist quote immediately to Supabase Cloud so any serverless lambda instance can retrieve it
+    // Also persist quote immediately to MySQL
     try {
-      const { supabase, isSupabaseConnected } = require('../supabase');
-      if (isSupabaseConnected()) {
-        await supabase.from('orders').upsert({
+      const { isMysqlConnected, persistToMysql } = require('../mysql');
+      if (isMysqlConnected()) {
+        await persistToMysql('orders', {
           order_id: tempOrderId,
           user_id: userId,
           asset_type: assetType,
@@ -325,7 +326,7 @@ exports.getPaymentQuote = async (req, res) => {
           timer_expiry: timerExpiry,
           receiver_details: receiverDetails,
           created_at: new Date().toISOString()
-        });
+        }, 'upsert', 'order_id');
       }
     } catch (_) {}
 
@@ -375,16 +376,16 @@ exports.createOrder = async (req, res) => {
     return exports.getPaymentQuote(req, res);
   }
 
-  // Look up quote from memory cache OR Supabase Cloud (essential for stateless Vercel lambdas)
+  
   let cachedQuote = null;
   if (orderId && activeQuotes.has(orderId)) {
     cachedQuote = activeQuotes.get(orderId);
   }
   if (!cachedQuote && orderId) {
     try {
-      const { supabase, isSupabaseConnected } = require('../supabase');
-      if (isSupabaseConnected()) {
-        const { data: dbQuote } = await supabase.from('orders').select('*').eq('order_id', orderId).maybeSingle();
+      const { isMysqlConnected, fetchOneFromMysql } = require('../mysql');
+      if (isMysqlConnected()) {
+        const dbQuote = await fetchOneFromMysql('orders', 'order_id', orderId);
         if (dbQuote && Number(dbQuote.amount) > 0) {
           cachedQuote = {
             amount: Number(dbQuote.amount),
@@ -428,11 +429,12 @@ exports.createOrder = async (req, res) => {
   // Enforce Admin configured Min / Max order limits
   loadDb();
   try {
-    const { supabase, isSupabaseConnected } = require('../supabase');
-    if (isSupabaseConnected()) {
-      const { data } = await supabase.from('settings').select('*').eq('key', 'config').maybeSingle();
-      if (data && data.value) {
-        dbData.settings = { ...(dbData.settings || {}), ...data.value };
+    const { isMysqlConnected, fetchOneFromMysql } = require('../mysql');
+    if (isMysqlConnected()) {
+      const row = await fetchOneFromMysql('settings', 'key', 'config');
+      if (row && row.value) {
+        const val = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+        dbData.settings = { ...(dbData.settings || {}), ...val };
       }
     }
   } catch (_) {}
@@ -537,10 +539,10 @@ exports.createOrder = async (req, res) => {
       }
       activeQuotes.delete(orderId);
       saveDb();
-      persistToSupabase('orders', order, 'update', 'order_id');
+      persistToDb('orders', order, 'update', 'order_id');
       if (withdrawal_id) {
         const w = dbData.withdrawals.find(x => x.id == withdrawal_id);
-        if (w) persistToSupabase('withdrawals', w, 'update', 'id');
+        if (w) persistToDb('withdrawals', w, 'update', 'id');
       }
     }
 
@@ -602,13 +604,13 @@ exports.listOrders = async (req, res) => {
 };
 
 const executeOrderApproval = async (order, txnId) => {
-  const { supabase, isSupabaseConnected } = require('../supabase');
+  const { isMysqlConnected, fetchOneFromMysql, persistToMysql } = require('../mysql');
 
-  // Re-verify latest status from database or Supabase to prevent duplicate processing
+  
   let currentOrder = await query.get('SELECT * FROM orders WHERE order_id = ?', [order.order_id]);
-  if (!currentOrder && isSupabaseConnected()) {
+  if (!currentOrder && isMysqlConnected()) {
     try {
-      const { data: suO } = await supabase.from('orders').select('*').eq('order_id', order.order_id).maybeSingle();
+      const suO = await fetchOneFromMysql('orders', 'order_id', order.order_id);
       if (suO) currentOrder = suO;
     } catch (_) {}
   }
@@ -631,16 +633,14 @@ const executeOrderApproval = async (order, txnId) => {
     dbOrder.completed_at = completedAt;
   }
 
-  // 1b. Update order status to Completed in Supabase Cloud
-  if (isSupabaseConnected()) {
-    try {
-      await supabase.from('orders').update({
-        status: 'Completed',
-        utr: finalUtr
-      }).eq('order_id', order.order_id);
-    } catch (e) {
-      console.warn('[executeOrderApproval] Supabase order update warning:', e.message);
+  // Update order status to Completed in MySQL
+  try {
+    const { isMysqlConnected, persistToMysql } = require('../mysql');
+    if (isMysqlConnected()) {
+      await persistToMysql('orders', { order_id: order.order_id, status: 'Completed' }, 'update', 'order_id');
     }
+  } catch (e) {
+    console.warn('[executeOrderApproval] MySQL order update warning:', e.message);
   }
 
   // 1c. ONLY if matched to an ACTUAL P2P withdrawal seller (withdrawal_id exists & receiver_id > 1)
@@ -648,9 +648,9 @@ const executeOrderApproval = async (order, txnId) => {
   const receiverId = order.receiver_id || (dbOrder ? dbOrder.receiver_id : null);
   if (linkedWithdrawalId && receiverId && receiverId != 1) {
     let seller = (dbData.users || []).find(u => u.id == receiverId);
-    if (!seller && isSupabaseConnected()) {
+    if (!seller && isMysqlConnected()) {
       try {
-        const { data: suSeller } = await supabase.from('users').select('*').eq('id', receiverId).maybeSingle();
+        const suSeller = await fetchOneFromMysql('users', 'id', receiverId);
         if (suSeller) seller = suSeller;
       } catch (_) {}
     }
@@ -685,17 +685,17 @@ const executeOrderApproval = async (order, txnId) => {
         }
       }
       saveDb();
-      persistToSupabase('transactions', withdrawTx, 'upsert', 'id');
-      persistToSupabase('users', seller, 'update', 'id');
-      if (w) persistToSupabase('withdrawals', w, 'update', 'id');
+      persistToDb('transactions', withdrawTx, 'upsert', 'id');
+      persistToDb('users', seller, 'update', 'id');
+      if (w) persistToDb('withdrawals', w, 'update', 'id');
     }
   }
 
   // 2. Fetch the user who placed this order (buyer)
   let buyer = await query.get('SELECT * FROM users WHERE id = ?', [order.user_id]);
-  if (!buyer && isSupabaseConnected()) {
+  if (!buyer && isMysqlConnected()) {
     try {
-      const { data: suBuyer } = await supabase.from('users').select('*').eq('id', order.user_id).maybeSingle();
+      const suBuyer = await fetchOneFromMysql('users', 'id', order.user_id);
       if (suBuyer) buyer = suBuyer;
     } catch (_) {}
   }
@@ -725,18 +725,12 @@ const executeOrderApproval = async (order, txnId) => {
     WHERE id = ?
   `, [updatedInrBalance, updatedBcoinBalance, updatedTotalEarnings, updatedTodayProfit, buyer.id]);
 
-  if (isSupabaseConnected()) {
-    try {
-      await supabase.from('users').update({
-        inr_balance: updatedInrBalance,
-        bcoin_balance: updatedBcoinBalance,
-        total_earnings: updatedTotalEarnings,
-        today_profit: updatedTodayProfit
-      }).eq('id', buyer.id);
-    } catch (e) {
-      console.warn('[executeOrderApproval] Supabase buyer update warning:', e.message);
+  try {
+    const { isMysqlConnected, persistToMysql } = require('../mysql');
+    if (isMysqlConnected()) {
+      await persistToMysql('users', buyer, 'update', 'id');
     }
-  }
+  } catch (e) {}
 
   // Log transactions for the buyer (Quota History)
   // 1. Log the principal Deposit transaction
@@ -752,7 +746,7 @@ const executeOrderApproval = async (order, txnId) => {
     created_at: completedAt
   };
   dbData.transactions.push(depTx);
-  persistToSupabase('transactions', depTx, 'upsert', 'id');
+  persistToDb('transactions', depTx, 'upsert', 'id');
 
   // 2. Log the expected income (Bonus) transaction
   const newTx2 = ++idTrackers.transactions;
@@ -766,7 +760,7 @@ const executeOrderApproval = async (order, txnId) => {
     created_at: completedAt
   };
   dbData.transactions.push(bonusTx);
-  persistToSupabase('transactions', bonusTx, 'upsert', 'id');
+  persistToDb('transactions', bonusTx, 'upsert', 'id');
   saveDb();
 
   // 3. Process 3-Level Commission Engine
@@ -786,9 +780,9 @@ const executeOrderApproval = async (order, txnId) => {
     if (!currentParentId) break;
 
     let parent = await query.get('SELECT * FROM users WHERE id = ?', [currentParentId]);
-    if (!parent && isSupabaseConnected()) {
+    if (!parent && isMysqlConnected()) {
       try {
-        const { data: suParent } = await supabase.from('users').select('*').eq('id', currentParentId).maybeSingle();
+        const suParent = await fetchOneFromMysql('users', 'id', currentParentId);
         if (suParent) parent = suParent;
       } catch (_) {}
     }
@@ -812,13 +806,15 @@ const executeOrderApproval = async (order, txnId) => {
         WHERE id = ?
       `, [Number(parent.inr_balance || 0), newParentBcoinBalance, newParentTotalEarnings, newParentTodayProfit, parent.id]);
 
-      if (isSupabaseConnected()) {
+      if (isMysqlConnected()) {
         try {
-          await supabase.from('users').update({
+          await persistToMysql('users', {
+            id: parent.id,
+            inr_balance: Number(parent.inr_balance || 0),
             bcoin_balance: newParentBcoinBalance,
             total_earnings: newParentTotalEarnings,
             today_profit: newParentTodayProfit
-          }).eq('id', parent.id);
+          }, 'update', 'id');
         } catch (_) {}
       }
 
@@ -833,7 +829,7 @@ const executeOrderApproval = async (order, txnId) => {
         created_at: completedAt
       };
       dbData.transactions.push(commTx);
-      persistToSupabase('transactions', commTx, 'upsert', 'id');
+      persistToDb('transactions', commTx, 'upsert', 'id');
       saveDb();
     }
 
@@ -847,10 +843,10 @@ exports.adminApproveOrder = async (req, res) => {
 
   try {
     let order = null;
-    const { supabase, isSupabaseConnected } = require('../supabase');
-    if (isSupabaseConnected()) {
+    const { isMysqlConnected, fetchOneFromMysql } = require('../mysql');
+    if (isMysqlConnected()) {
       try {
-        const { data: suO } = await supabase.from('orders').select('*').eq('order_id', orderId).maybeSingle();
+        const suO = await fetchOneFromMysql('orders', 'order_id', orderId);
         if (suO) order = suO;
       } catch (_) {}
     }
@@ -916,7 +912,7 @@ exports.adminCancelOrder = async (req, res) => {
       dbOrder.cancel_reason = 'Admin Manual Reject';
       dbOrder.is_auto_rejected = false;
       saveDb();
-      persistToSupabase('orders', dbOrder, 'update', 'order_id');
+      persistToDb('orders', dbOrder, 'update', 'order_id');
     }
 
     if (order.withdrawal_id) {

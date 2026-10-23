@@ -32,62 +32,58 @@ async function generateUniqueRefCode() {
 // In-memory OTP storage fallback
 const activeOtps = new Map();
 
-// Helper to save OTP both in-memory and in Supabase for cross-serverless persistence
+// Helper to save OTP both in-memory and in MySQL for persistence
 async function saveOtpRecord(mobile, otp) {
   const expiresAt = Date.now() + 5 * 60 * 1000;
   activeOtps.set(mobile, { otp, expiresAt });
 
   try {
-    const { supabase, isSupabaseConnected } = require('../supabase');
-    if (isSupabaseConnected()) {
-      await supabase.from('settings').upsert({
-        key: `otp_${mobile}`,
-        value: { mobile, otp, expiresAt },
-        updated_at: new Date().toISOString()
-      });
+    const { isMysqlConnected, persistToMysql } = require('../mysql');
+    if (isMysqlConnected()) {
+      await persistToMysql('settings', {
+        key: 'otp_' + mobile,
+        value: JSON.stringify({ mobile, otp, expiresAt })
+      }, 'upsert', 'key');
     }
   } catch (err) {
-    console.error('[OTP] Error storing OTP in Supabase:', err.message);
+    console.error('[OTP] Error storing OTP in MySQL:', err.message);
   }
 }
 
-// Helper to verify and consume OTP across serverless instances
+// Helper to verify and consume OTP
 async function verifyAndConsumeOtp(mobile, inputOtp) {
   if (!inputOtp) return false;
-  // Test/Admin bypass
   if (inputOtp === '123456') return true;
 
-  // 1. Check in-memory map
   const mem = activeOtps.get(mobile);
   if (mem) {
     if (mem.otp === inputOtp && Date.now() <= mem.expiresAt) {
       activeOtps.delete(mobile);
       try {
-        const { supabase, isSupabaseConnected } = require('../supabase');
-        if (isSupabaseConnected()) {
-          supabase.from('settings').delete().eq('key', `otp_${mobile}`).then(() => {}, () => {});
+        const { isMysqlConnected, persistToMysql } = require('../mysql');
+        if (isMysqlConnected()) {
+          persistToMysql('settings', { key: 'otp_' + mobile }, 'delete', 'key').catch(() => {});
         }
       } catch (e) {}
       return true;
     }
   }
 
-  // 2. Check Supabase settings table for cross-instance verification
   try {
-    const { supabase, isSupabaseConnected } = require('../supabase');
-    if (isSupabaseConnected()) {
-      const { data } = await supabase.from('settings').select('*').eq('key', `otp_${mobile}`).maybeSingle();
+    const { isMysqlConnected, fetchOneFromMysql, persistToMysql } = require('../mysql');
+    if (isMysqlConnected()) {
+      const data = await fetchOneFromMysql('settings', 'key', 'otp_' + mobile);
       if (data && data.value) {
-        const otpRecord = data.value;
+        const otpRecord = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
         if (otpRecord.otp === inputOtp && Date.now() <= Number(otpRecord.expiresAt)) {
-          supabase.from('settings').delete().eq('key', `otp_${mobile}`).then(() => {}, () => {});
+          persistToMysql('settings', { key: 'otp_' + mobile }, 'delete', 'key').catch(() => {});
           activeOtps.delete(mobile);
           return true;
         }
       }
     }
   } catch (err) {
-    console.error('[OTP] Error verifying OTP from Supabase:', err.message);
+    console.error('[OTP] Error verifying OTP from MySQL:', err.message);
   }
 
   return false;
@@ -174,7 +170,7 @@ exports.sendOtp = async (req, res) => {
   // Generate 6-digit OTP
   const otp = String(Math.floor(100000 + Math.random() * 900000));
   
-  // Persist OTP in Supabase + Memory
+  // Persist OTP in MySQL + Memory
   await saveOtpRecord(mobile, otp);
 
   // Dispatch SMS and ensure network transmission completes before ending serverless function
@@ -288,15 +284,7 @@ exports.login = async (req, res) => {
   }
 
   try {
-    const { supabase, isSupabaseConnected } = require('../supabase');
-    let user = null;
-    if (isSupabaseConnected()) {
-      const { data } = await supabase.from('users').select('*').eq('mobile', mobile).maybeSingle();
-      user = data;
-    }
-    if (!user) {
-      user = await query.get('SELECT * FROM users WHERE mobile = ?', [mobile]);
-    }
+    const user = await query.get('SELECT * FROM users WHERE mobile = ?', [mobile]);
     if (!user) {
       return res.status(400).json({ error: 'Account not found. Please sign up.' });
     }

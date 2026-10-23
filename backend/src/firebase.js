@@ -1,17 +1,14 @@
 const admin = require('firebase-admin');
 const { getMessaging } = require('firebase-admin/messaging');
-const { getFirestore } = require('firebase-admin/firestore');
 const path = require('path');
 const fs = require('fs');
 
 const serviceAccountPath = path.join(__dirname, 'firebase-service-account.json');
 
 let initialized = false;
-let firestoreDb = null;
 
 // Helper to safely parse service account from env or file
 function resolveServiceAccount() {
-  // 1. Environment variable: FIREBASE_SERVICE_ACCOUNT
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     try {
       const raw = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
@@ -21,7 +18,6 @@ function resolveServiceAccount() {
     }
   }
 
-  // 2. Environment variable: FIREBASE_CONFIG
   if (process.env.FIREBASE_CONFIG) {
     try {
       const raw = process.env.FIREBASE_CONFIG.trim();
@@ -33,7 +29,6 @@ function resolveServiceAccount() {
     }
   }
 
-  // 3. Local JSON file on disk
   if (fs.existsSync(serviceAccountPath)) {
     try {
       return require(serviceAccountPath);
@@ -56,23 +51,21 @@ if (serviceAccount) {
       });
     }
     initialized = true;
-    firestoreDb = getFirestore();
-    firestoreDb.settings({ ignoreUndefinedProperties: true });
-    console.log('[Firebase] Admin SDK & Firestore database connected successfully. Project:', serviceAccount.project_id);
+    console.log('[Firebase] Admin SDK FCM Push Notification service initialized successfully. Project:', serviceAccount.project_id);
   } catch (err) {
-    console.error('[Firebase] Failed to initialize Firebase:', err.message);
+    console.error('[Firebase] Failed to initialize Firebase Messaging:', err.message);
   }
 } else {
-  console.warn('[Firebase] No Firebase credentials found. Running in local file database mode.');
+  console.log('[Firebase] No Firebase credentials found. Push notifications will run in mock mode.');
 }
 
 /**
- * Push Notification Dispatcher
+ * FCM Push Notification Dispatcher (Strictly for Notifications only)
  */
 async function sendPushNotification(user, title, body, data = {}) {
   if (!user) return;
   if (!initialized) {
-    console.log(`[Firebase Mock] Push to User ${user.username} (ID: ${user.id}): "${title}" - "${body}"`);
+    console.log(`[Firebase Notification Mock] Push to User ${user.username || user.mobile} (ID: ${user.id}): "${title}" - "${body}"`);
     return;
   }
 
@@ -80,54 +73,30 @@ async function sendPushNotification(user, title, body, data = {}) {
     return;
   }
 
-  const tokens = user.fcm_tokens.filter(t => t && t.trim().length > 0);
+  const tokens = (Array.isArray(user.fcm_tokens) ? user.fcm_tokens : [user.fcm_tokens]).filter(t => t && typeof t === 'string' && t.trim().length > 0);
   if (tokens.length === 0) return;
+
+  const stringData = {};
+  for (const [k, v] of Object.entries(data)) {
+    stringData[k] = String(v);
+  }
 
   const message = {
     notification: { title, body },
-    data,
+    data: stringData,
     tokens
   };
 
   try {
     const response = await getMessaging().sendEachForMulticast(message);
-    console.log(`[Firebase] Multicast sent: ${response.successCount} success, ${response.failureCount} failed.`);
+    console.log(`[Firebase FCM] Notification sent to user ${user.id}: ${response.successCount} success, ${response.failureCount} failed.`);
   } catch (err) {
-    console.error('[Firebase] Error sending multicast message:', err.message);
+    console.error('[Firebase FCM] Error sending push notification:', err.message);
   }
-}
-
-/**
- * Firestore Cloud Database Synchronizer
- * Configurable prefix (default: gopay_)
- */
-const PREFIX = process.env.FIREBASE_PREFIX || 'gopay_';
-
-const TABLE_DEFINITIONS = [
-  { key: 'users', coll: `${PREFIX}users`, idField: 'id' },
-  { key: 'orders', coll: `${PREFIX}orders`, idField: 'id' },
-  { key: 'bank_accounts', coll: `${PREFIX}bank_accounts`, idField: 'id' },
-  { key: 'transactions', coll: `${PREFIX}transactions`, idField: 'id' },
-  { key: 'withdrawals', coll: `${PREFIX}withdrawals`, idField: 'id' },
-  { key: 'disputes', coll: `${PREFIX}disputes`, idField: 'id' },
-  { key: 'user_tasks', coll: `${PREFIX}user_tasks`, idField: 'id' },
-  { key: 'messages', coll: `${PREFIX}messages`, idField: 'id' }
-];
-
-// Database storage is now fully migrated to Supabase. Firebase is reserved exclusively for FCM Push Notifications.
-async function loadFromFirestore() {
-  return null;
-}
-
-async function syncToFirestore(dbData, idTrackers) {
-  return;
 }
 
 module.exports = {
   admin,
-  firestoreDb,
-  isFirebaseConnected: () => !!firestoreDb,
-  sendPushNotification,
-  loadFromFirestore,
-  syncToFirestore
+  isFirebaseConnected: () => initialized,
+  sendPushNotification
 };

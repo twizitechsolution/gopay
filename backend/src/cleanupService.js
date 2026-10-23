@@ -1,5 +1,5 @@
 const { dbData, saveDb, query } = require('./db');
-const { supabase, isSupabaseConnected } = require('./supabase');
+const { isMysqlConnected, queryMysql } = require('./mysql');
 
 /**
  * 7-Day Auto Cleanup Service
@@ -71,17 +71,14 @@ async function runSevenDayCleanup() {
         }
         const userCreated = new Date(u.created_at);
         if (userCreated < sevenDaysAgo) {
-          // Check if user has bank account
           const hasBank = dbData.bank_accounts && dbData.bank_accounts.some(b => b.user_id == u.id);
-          // Check if user has completed plan/deposit orders
           const hasPlans = dbData.orders && dbData.orders.some(o => o.user_id == u.id && o.status === 'Completed');
-          // Check if user has active balance or transactions
           const hasBalance = (Number(u.inr_balance) > 0 || Number(u.bcoin_balance) > 0);
           const hasActivity = dbData.transactions && dbData.transactions.some(t => t.user_id == u.id);
 
           if (!hasBank && !hasPlans && !hasBalance && !hasActivity) {
             userIdsToDelete.push(u.id);
-            continue; // purge inactive user
+            continue;
           }
         }
         usersToKeep.push(u);
@@ -90,15 +87,24 @@ async function runSevenDayCleanup() {
       purgedUsersCount = dbData.users.length - usersToKeep.length;
       dbData.users = usersToKeep;
 
-      if (userIdsToDelete.length > 0 && isSupabaseConnected()) {
-        await supabase.from('users').delete().in('id', userIdsToDelete);
+      if (userIdsToDelete.length > 0 && isMysqlConnected()) {
+        try {
+          const placeholders = userIdsToDelete.map(() => '?').join(',');
+          await queryMysql(`DELETE FROM users WHERE id IN (${placeholders})`, userIdsToDelete);
+        } catch (e) {
+          console.error('[Cleanup] Error deleting inactive users from MySQL:', e.message);
+        }
       }
     }
 
-    // Supabase DB Purge
-    if (isSupabaseConnected()) {
-      await supabase.from('transactions').delete().lt('created_at', sevenDaysAgoIso);
-      await supabase.from('orders').delete().lt('created_at', sevenDaysAgoIso).in('status', ['Completed', 'Canceled']);
+    // MySQL Purge
+    if (isMysqlConnected()) {
+      try {
+        await queryMysql('DELETE FROM transactions WHERE created_at < ?', [sevenDaysAgoIso]);
+        await queryMysql("DELETE FROM orders WHERE created_at < ? AND status IN ('Completed', 'Canceled')", [sevenDaysAgoIso]);
+      } catch (e) {
+        console.error('[Cleanup] Error purging old ledger data from MySQL:', e.message);
+      }
     }
 
     saveDb();
@@ -109,31 +115,42 @@ async function runSevenDayCleanup() {
       purgedTransactionsCount,
       purgedOrdersCount,
       purgedUsersCount,
-      timestamp: now.toISOString()
+      message: `Successfully purged ${purgedTransactionsCount} transactions, ${purgedOrdersCount} orders, and ${purgedUsersCount} inactive accounts.`
     };
   } catch (err) {
-    console.error('[Cleanup] Error during 7-day maintenance:', err.message);
-    return { success: false, error: err.message };
+    console.error('[Cleanup] Error running 7-day database cleanup:', err.message);
+    return {
+      success: false,
+      error: err.message
+    };
   }
 }
 
-// Schedule daily run at midnight
-function scheduleMidnightCleanup() {
-  const checkInterval = 60 * 60 * 1000; // Check every hour
-  let lastRunDate = null;
-
-  setInterval(async () => {
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    // Run if past midnight (00:00 - 01:00) and hasn't run today
-    if (now.getHours() === 0 && lastRunDate !== todayStr) {
-      lastRunDate = todayStr;
-      await runSevenDayCleanup();
+/**
+ * Schedule automated daily cleanup check at 03:00 AM
+ */
+function initCleanupScheduler() {
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  setInterval(() => {
+    try {
+      runSevenDayCleanup();
+    } catch (e) {
+      console.error('[Cleanup Scheduler] Background job execution error:', e.message);
     }
-  }, checkInterval);
+  }, ONE_DAY_MS);
+
+  // Run initial lightweight cleanup 10 seconds after server boot
+  setTimeout(() => {
+    try {
+      runSevenDayCleanup();
+    } catch (e) {
+      console.warn('[Cleanup Initial Check] Error:', e.message);
+    }
+  }, 10000);
 }
 
 module.exports = {
   runSevenDayCleanup,
-  scheduleMidnightCleanup
+  initCleanupScheduler,
+  scheduleMidnightCleanup: initCleanupScheduler
 };

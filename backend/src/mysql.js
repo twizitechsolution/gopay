@@ -14,7 +14,7 @@ function getMysqlConfig() {
         port: parseInt(u.port, 10) || 3306,
         user: u.username || 'root',
         password: u.password || '',
-        database: u.pathname.replace(/^\//, ''),
+        database: u.pathname.replace(/^\//, '') || 'gopay_db',
         waitForConnections: true,
         connectionLimit: 15,
         queueLimit: 0,
@@ -26,17 +26,31 @@ function getMysqlConfig() {
   }
 
   // Check individual environment variables
-  const host = process.env.MYSQL_HOST;
-  const database = process.env.MYSQL_DATABASE;
+  const host = process.env.MYSQL_HOST || process.env.DB_HOST;
+  const database = process.env.MYSQL_DATABASE || process.env.DB_NAME;
+  const user = process.env.MYSQL_USER || process.env.DB_USER || 'root';
+  const password = process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD || '';
+  const port = parseInt(process.env.MYSQL_PORT || process.env.DB_PORT, 10) || 3306;
+
   if (!host && !database) {
-    return null;
+    return {
+      host: '127.0.0.1',
+      port: 3306,
+      user: 'root',
+      password: '',
+      database: 'gopay_db',
+      waitForConnections: true,
+      connectionLimit: 15,
+      queueLimit: 0,
+      charset: 'utf8mb4'
+    };
   }
 
   return {
     host: host || '127.0.0.1',
-    port: parseInt(process.env.MYSQL_PORT, 10) || 3306,
-    user: process.env.MYSQL_USER || 'root',
-    password: process.env.MYSQL_PASSWORD || '',
+    port: port,
+    user: user,
+    password: password,
     database: database || 'gopay_db',
     waitForConnections: true,
     connectionLimit: 15,
@@ -47,10 +61,6 @@ function getMysqlConfig() {
 
 async function initMysql() {
   const cfg = getMysqlConfig();
-  if (!cfg) {
-    console.log('[MySQL] No MySQL configuration found in .env. Running in file/memory mode.');
-    return false;
-  }
 
   try {
     let mysql2;
@@ -81,14 +91,29 @@ function isMysqlConnected() {
   return isConnected && pool !== null;
 }
 
+// Helper to auto-parse JSON fields in rows
+function normalizeRow(row) {
+  if (!row) return row;
+  const jsonFields = ['fcm_tokens', 'receiver_details', 'value'];
+  for (const field of jsonFields) {
+    if (row[field] && typeof row[field] === 'string') {
+      try {
+        row[field] = JSON.parse(row[field]);
+      } catch (e) {
+        // Leave as string if not valid JSON
+      }
+    }
+  }
+  return row;
+}
+
 // Fetch all rows from a MySQL table
 async function fetchAllFromMysql(table, limit = 50000) {
   if (!isMysqlConnected()) return [];
   try {
     const [rows] = await pool.query(`SELECT * FROM \`${table}\` ORDER BY id DESC LIMIT ?`, [limit]);
-    return rows || [];
+    return (rows || []).map(normalizeRow);
   } catch (err) {
-    // If table doesn't exist yet, return empty
     if (err.code !== 'ER_NO_SUCH_TABLE') {
       console.error(`[MySQL Fetch Error] Table ${table}:`, err.message);
     }
@@ -96,7 +121,34 @@ async function fetchAllFromMysql(table, limit = 50000) {
   }
 }
 
-// Persist single record to MySQL table
+// Fetch single row from a MySQL table
+async function fetchOneFromMysql(table, col, val) {
+  if (!isMysqlConnected()) return null;
+  try {
+    const [rows] = await pool.query(`SELECT * FROM \`${table}\` WHERE \`${col}\` = ? LIMIT 1`, [val]);
+    if (rows && rows.length > 0) {
+      return normalizeRow(rows[0]);
+    }
+    return null;
+  } catch (err) {
+    console.error(`[MySQL fetchOne Error] ${table} where ${col}=${val}:`, err.message);
+    return null;
+  }
+}
+
+// Fetch rows matching a WHERE condition
+async function fetchWhereFromMysql(table, col, val, limit = 1000) {
+  if (!isMysqlConnected()) return [];
+  try {
+    const [rows] = await pool.query(`SELECT * FROM \`${table}\` WHERE \`${col}\` = ? ORDER BY id DESC LIMIT ?`, [val, limit]);
+    return (rows || []).map(normalizeRow);
+  } catch (err) {
+    console.error(`[MySQL fetchWhere Error] ${table} where ${col}=${val}:`, err.message);
+    return [];
+  }
+}
+
+// Persist single record to MySQL table (insert, update, upsert, delete)
 async function persistToMysql(table, record, operation = 'upsert', matchField = 'id') {
   if (!isMysqlConnected() || !record) return;
 
@@ -160,6 +212,8 @@ module.exports = {
   initMysql,
   isMysqlConnected,
   fetchAllFromMysql,
+  fetchOneFromMysql,
+  fetchWhereFromMysql,
   persistToMysql,
   queryMysql,
   getPool: () => pool
