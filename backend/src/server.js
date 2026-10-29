@@ -488,23 +488,34 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
 
           list = allOrders.map(order => {
             const user = usersMap[order.user_id] || {};
-            const recId = order.receiver_id;
-            let receiver_mobile = 'N/A';
-            let receiver_uid = 'OFFICIAL';
-            let receiver_name = 'Official Merchant';
-            let receiver_bank = 'UPI Merchant';
-            let receiver_account = 'N/A';
-            let receiver_upi = 'Earnclub@apl';
+            let rDetails = null;
+            if (order.receiver_details) {
+              try {
+                rDetails = typeof order.receiver_details === 'string' ? JSON.parse(order.receiver_details) : order.receiver_details;
+              } catch (e) {}
+            }
+            const recId = order.receiver_id || order.seller_id || (rDetails ? (rDetails.user_id || rDetails.id) : null);
+            let receiver_mobile = (rDetails && rDetails.mobile) || 'N/A';
+            let receiver_uid = (rDetails && (rDetails.uid || rDetails.receiver_uid)) || 'OFFICIAL';
+            let receiver_name = (rDetails && rDetails.receiver_name) || 'Official Merchant';
+            let receiver_bank = (rDetails && rDetails.bank_name) || 'UPI Merchant';
+            let receiver_account = (rDetails && rDetails.account_number) || 'N/A';
+            let receiver_upi = (rDetails && rDetails.upi_id) || 'Earnclub@apl';
 
             if (recId) {
               const receiverUser = usersMap[recId];
               const bankAcc = banksMap[recId];
-              receiver_mobile = receiverUser ? receiverUser.mobile : 'N/A';
-              receiver_uid = receiverUser ? receiverUser.uid : 'N/A';
-              receiver_name = bankAcc ? bankAcc.account_holder : (receiverUser ? (receiverUser.username || 'P2P Seller') : 'P2P Seller');
-              receiver_bank = bankAcc ? bankAcc.bank_name : 'Bank';
-              receiver_account = bankAcc ? bankAcc.account_number : 'N/A';
-              receiver_upi = bankAcc ? bankAcc.upi_id : (receiverUser ? `${receiverUser.mobile}@upi` : 'N/A');
+              if (receiverUser) {
+                if (receiver_mobile === 'N/A') receiver_mobile = receiverUser.mobile || 'N/A';
+                if (receiver_uid === 'OFFICIAL' || receiver_uid === 'N/A') receiver_uid = receiverUser.uid || 'N/A';
+                if (receiver_name === 'Official Merchant') receiver_name = receiverUser.username || 'P2P Seller';
+              }
+              if (bankAcc) {
+                if (receiver_name === 'Official Merchant' || receiver_name === 'P2P Seller') receiver_name = bankAcc.account_holder || receiver_name;
+                if (receiver_bank === 'UPI Merchant') receiver_bank = bankAcc.bank_name || 'Bank';
+                if (receiver_account === 'N/A') receiver_account = bankAcc.account_number || 'N/A';
+                if (receiver_upi === 'Earnclub@apl') receiver_upi = bankAcc.upi_id || 'N/A';
+              }
             }
 
             return {
@@ -536,8 +547,21 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
 
       list.forEach(order => {
         order.amount = Number(order.amount) || 0;
-        const recId = order.receiver_id;
-        if (recId) {
+        let rDetails = null;
+        if (order.receiver_details) {
+          try {
+            rDetails = typeof order.receiver_details === 'string' ? JSON.parse(order.receiver_details) : order.receiver_details;
+          } catch (e) {}
+        }
+        const recId = order.receiver_id || order.seller_id || (rDetails ? (rDetails.user_id || rDetails.id) : null);
+        if (rDetails && rDetails.bank_name) {
+          order.receiver_mobile = rDetails.mobile || 'N/A';
+          order.receiver_uid = rDetails.uid || 'N/A';
+          order.receiver_name = rDetails.receiver_name || 'P2P Seller';
+          order.receiver_bank = rDetails.bank_name || 'Bank';
+          order.receiver_account = rDetails.account_number || 'N/A';
+          order.receiver_upi = rDetails.upi_id || 'N/A';
+        } else if (recId) {
           const receiverUser = (dbData.users || []).find(u => u.id == recId);
           const bankAcc = (dbData.bank_accounts || []).find(b => b.user_id == recId && b.status === 'Active') ||
                           (dbData.bank_accounts || []).find(b => b.user_id == recId);
@@ -546,7 +570,7 @@ app.get('/api/admin/orders', adminAuth, async (req, res) => {
           order.receiver_name = bankAcc ? bankAcc.account_holder : (receiverUser ? (receiverUser.username || 'P2P Seller') : 'P2P Seller');
           order.receiver_bank = bankAcc ? bankAcc.bank_name : 'Bank';
           order.receiver_account = bankAcc ? bankAcc.account_number : 'N/A';
-          order.receiver_upi = bankAcc ? bankAcc.upi_id : (receiverUser ? `${receiverUser.mobile}@upi` : 'N/A');
+          order.receiver_upi = bankAcc ? bankAcc.upi_id : (receiverUser ? (receiverUser.mobile + '@upi') : 'N/A');
         } else {
           order.receiver_mobile = 'N/A';
           order.receiver_uid = 'OFFICIAL';

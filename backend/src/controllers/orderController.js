@@ -210,26 +210,51 @@ exports.getPaymentQuote = async (req, res) => {
         }
       }
 
-      // Find eligible P2P sellers: MUST HAVE AN EXPLICIT PENDING WITHDRAWAL REQUEST!
-      // A regular customer who did NOT request a withdrawal must NEVER have their balance deducted!
-      const eligibleWithdrawals = (dbData.withdrawals || []).filter(w => {
-        if (w.status !== 'Pending' || Number(w.amount_pending || 0) < amtNum) return false;
-        const seller = (dbData.users || []).find(u => u.id == w.user_id);
-        if (!seller || seller.id == userId || seller.id == 1 || seller.is_blocked) return false;
-        if (Number(seller.bcoin_balance || 0) < amtNum) return false;
+      // Fetch fresh records from MySQL if available, else in-memory dbData
+      let allUsers = [];
+      let allBanks = [];
+      let allOrders = [];
+      try {
+        const { isMysqlConnected, fetchAllFromMysql } = require('../mysql');
+        if (isMysqlConnected()) {
+          allUsers = await fetchAllFromMysql('users', 10000);
+          allBanks = await fetchAllFromMysql('bank_accounts', 10000);
+          allOrders = await fetchAllFromMysql('orders', 5000);
+        }
+      } catch (err) {}
 
-        const hasActiveBank = (dbData.bank_accounts || []).some(b => b.user_id == seller.id && b.status === 'Active');
-        if (!hasActiveBank) return false;
+      if (!allUsers || allUsers.length === 0) allUsers = dbData.users || [];
+      if (!allBanks || allBanks.length === 0) allBanks = dbData.bank_accounts || [];
+      if (!allOrders || allOrders.length === 0) allOrders = dbData.orders || [];
 
-        // STRICT CONCURRENCY LOCK 1: Must NOT have any active/undecided orders assigned as receiver
-        const hasActiveOrder = (dbData.orders || []).some(o => 
-          o.receiver_id == seller.id && ['Pending', 'Confirming', 'Admin Review', 'Disputed'].includes(o.status)
+      // Find eligible P2P sellers:
+      // 1. Registered user with bcoin_balance (or tcoin_balance) >= recharge amount
+      // 2. Not the buyer themselves (strictly excluded)
+      // 3. User is not blocked
+      // 4. Must have at least one active bank account with bank name and account number
+      // 5. Must NOT have any active/pending orders assigned as seller/receiver (Pending, Confirming, Admin Review, Disputed)
+      // 6. Must NOT have an active quote currently locked in memory
+      const eligibleSellers = allUsers.filter(seller => {
+        if (Number(seller.id) === Number(userId)) return false;
+        if (seller.is_blocked) return false;
+        const sellerBal = Number(seller.bcoin_balance || seller.tcoin_balance || 0);
+        if (sellerBal < amtNum) return false;
+
+        const sellerBanks = allBanks.filter(b => 
+          Number(b.user_id) === Number(seller.id) &&
+          (b.status === 'Active' || !b.status) &&
+          b.account_number && b.bank_name
         );
-        if (hasActiveOrder) return false;
+        if (sellerBanks.length === 0) return false;
 
-        // STRICT CONCURRENCY LOCK 2: Must NOT have any active unexpired quote currently assigned in memory
+        const hasPendingOrder = allOrders.some(o => 
+          (Number(o.seller_id) === Number(seller.id) || Number(o.receiver_id) === Number(seller.id)) &&
+          ['Pending', 'Confirming', 'Admin Review', 'Disputed'].includes(o.status)
+        );
+        if (hasPendingOrder) return false;
+
         const hasActiveQuote = Array.from(activeQuotes.values()).some(q => 
-          q.receiverId == seller.id && nowMs < new Date(q.timerExpiry).getTime()
+          Number(q.receiverId) === Number(seller.id) && nowMs < new Date(q.timerExpiry).getTime()
         );
         if (hasActiveQuote) return false;
 
@@ -237,40 +262,43 @@ exports.getPaymentQuote = async (req, res) => {
       });
 
       let matchedUser = null;
-      if (eligibleWithdrawals.length > 0) {
-        // Uniform fair rotation across all eligible withdrawal requests
-        const shuffled = [...eligibleWithdrawals].sort(() => Math.random() - 0.5);
-        const selectedW = shuffled[0];
-        matchedUser = (dbData.users || []).find(u => u.id == selectedW.user_id);
-        withdrawalId = selectedW.id;
+      if (eligibleSellers.length > 0) {
+        // Uniform fair rotation / randomization across eligible sellers
+        const shuffled = [...eligibleSellers].sort(() => Math.random() - 0.5);
+        matchedUser = shuffled[0];
       }
 
       if (matchedUser) {
         receiverId = matchedUser.id;
         timerExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-        
-        const activeBanks = dbData.bank_accounts.filter(b => b.user_id == receiverId && b.status === 'Active');
+
+        const activeBanks = allBanks.filter(b => 
+          Number(b.user_id) === Number(receiverId) &&
+          (b.status === 'Active' || !b.status) &&
+          b.account_number && b.bank_name
+        );
         const bank = activeBanks.length > 0 
           ? activeBanks[Math.floor(Math.random() * activeBanks.length)]
-          : (dbData.bank_accounts.find(b => b.user_id == receiverId) || {});
+          : {};
 
         const receiverUser = matchedUser;
-        const settings = dbData.settings || {};
-        const fallbackUpi = settings.upi_ids ? settings.upi_ids.split(',')[0].trim() : 'merchant@upi';
+        const fallbackUpi = receiverUser.mobile ? (receiverUser.mobile + '@upi') : 'merchant@upi';
 
         receiverDetails = {
-          receiver_name: bank.account_holder || receiverUser.username || 'P2P Merchant',
+          receiver_name: bank.account_holder || receiverUser.username || 'P2P Seller',
           bank_name: bank.bank_name || 'Bank',
           account_number: bank.account_number || 'N/A',
           ifsc_code: bank.ifsc_code || 'N/A',
-          upi_id: bank.upi_id || (receiverUser.mobile ? `${receiverUser.mobile}@upi` : fallbackUpi),
-          mobile: receiverUser.mobile
+          upi_id: bank.upi_id || fallbackUpi,
+          mobile: receiverUser.mobile || 'N/A',
+          user_id: receiverUser.id,
+          uid: receiverUser.uid || 'N/A'
         };
       } else {
         // Fallback to Official Merchant
         receiverId = null;
         timerExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-        
+
         const settings = dbData.settings || {};
         const upiList = settings.upi_ids ? settings.upi_ids.split(',').map(s => s.trim()).filter(Boolean) : [];
         const fallbackUpi = upiList.length > 0 ? upiList[Math.floor(Math.random() * upiList.length)] : 'Earnclub@apl';
@@ -486,21 +514,35 @@ exports.createOrder = async (req, res) => {
     }
 
     const timerExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    const finalReceiverId = receiver_id || null;
+    const finalReceiverId = receiver_id || (cachedQuote && cachedQuote.receiverId) || null;
 
     // Build receiver details
-    let receiverDetails = null;
-    if (finalReceiverId) {
-      const bank = (dbData.bank_accounts || []).find(b => b.user_id == finalReceiverId && b.status === 'Active');
-      const receiverUser = (dbData.users || []).find(u => u.id == finalReceiverId);
+    let receiverDetails = cachedQuote && cachedQuote.receiverDetails ? cachedQuote.receiverDetails : null;
+    if (!receiverDetails && finalReceiverId) {
+      let allBanks = [];
+      let allUsers = [];
+      try {
+        const { isMysqlConnected, fetchAllFromMysql } = require('../mysql');
+        if (isMysqlConnected()) {
+          allBanks = await fetchAllFromMysql('bank_accounts', 10000);
+          allUsers = await fetchAllFromMysql('users', 10000);
+        }
+      } catch (_) {}
+      if (!allBanks || allBanks.length === 0) allBanks = dbData.bank_accounts || [];
+      if (!allUsers || allUsers.length === 0) allUsers = dbData.users || [];
+
+      const bank = allBanks.find(b => Number(b.user_id) === Number(finalReceiverId) && (b.status === 'Active' || !b.status));
+      const receiverUser = allUsers.find(u => Number(u.id) === Number(finalReceiverId));
       if (bank && receiverUser) {
         receiverDetails = {
-          receiver_name: bank.account_holder,
-          bank_name: bank.bank_name,
-          account_number: bank.account_number,
-          ifsc_code: bank.ifsc_code,
-          upi_id: bank.upi_id || `${receiverUser.mobile}@upi`,
-          mobile: receiverUser.mobile
+          receiver_name: bank.account_holder || receiverUser.username || 'P2P Seller',
+          bank_name: bank.bank_name || 'Bank',
+          account_number: bank.account_number || 'N/A',
+          ifsc_code: bank.ifsc_code || 'N/A',
+          upi_id: bank.upi_id || (receiverUser.mobile + '@upi'),
+          mobile: receiverUser.mobile || 'N/A',
+          user_id: receiverUser.id,
+          uid: receiverUser.uid || 'N/A'
         };
       }
     }
@@ -527,33 +569,61 @@ exports.createOrder = async (req, res) => {
       screenshotPath = await saveBase64File(screenshot, 'screenshot');
     }
 
-    await query.run(`
-      INSERT INTO orders (order_id, user_id, asset_type, amount, expected_income, quota, status, utr)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [orderId, userId, assetType, amtNum, expectedIncome, quota, 'Confirming', cleanUtr]);
+    try {
+      await query.run(`
+        INSERT INTO orders (order_id, user_id, seller_id, asset_type, amount, expected_income, quota, status, utr, screenshot_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Confirming', ?, ?)
+      `, [orderId, userId, finalReceiverId, assetType, amtNum, expectedIncome, quota, cleanUtr, screenshotPath]);
+    } catch (_) {
+      try {
+        await query.run(`
+          INSERT INTO orders (order_id, user_id, asset_type, amount, expected_income, quota, status, utr)
+          VALUES (?, ?, ?, ?, ?, ?, 'Confirming', ?)
+        `, [orderId, userId, assetType, amtNum, expectedIncome, quota, cleanUtr]);
+      } catch (err2) {}
+    }
 
     loadDb();
-    const order = dbData.orders.find(o => o.order_id === orderId);
-    if (order) {
+    let order = dbData.orders.find(o => o.order_id === orderId);
+    if (!order) {
+      order = {
+        order_id: orderId,
+        user_id: userId,
+        seller_id: finalReceiverId,
+        receiver_id: finalReceiverId,
+        asset_type: assetType,
+        amount: amtNum,
+        expected_income: expectedIncome,
+        quota: quota,
+        status: 'Confirming',
+        utr: cleanUtr,
+        screenshot_path: screenshotPath,
+        receiver_details: receiverDetails,
+        timer_expiry: timerExpiry,
+        created_at: new Date().toISOString()
+      };
+      dbData.orders.push(order);
+    } else {
+      order.seller_id = finalReceiverId;
       order.receiver_id = finalReceiverId;
       order.timer_expiry = timerExpiry;
       order.receiver_details = receiverDetails;
       if (screenshotPath) order.screenshot_path = screenshotPath;
+    }
 
-      if (withdrawal_id) {
-        const w = dbData.withdrawals.find(x => x.id == withdrawal_id);
-        if (w) {
-          order.withdrawal_id = w.id;
-          w.amount_pending = Math.max(0, w.amount_pending - amtNum);
-        }
+    if (withdrawal_id) {
+      const w = dbData.withdrawals.find(x => x.id == withdrawal_id);
+      if (w) {
+        order.withdrawal_id = w.id;
+        w.amount_pending = Math.max(0, w.amount_pending - amtNum);
       }
-      activeQuotes.delete(orderId);
-      saveDb();
-      persistToDb('orders', order, 'update', 'order_id');
-      if (withdrawal_id) {
-        const w = dbData.withdrawals.find(x => x.id == withdrawal_id);
-        if (w) persistToDb('withdrawals', w, 'update', 'id');
-      }
+    }
+    activeQuotes.delete(orderId);
+    saveDb();
+    persistToDb('orders', order, 'update', 'order_id');
+    if (withdrawal_id) {
+      const w = dbData.withdrawals.find(x => x.id == withdrawal_id);
+      if (w) persistToDb('withdrawals', w, 'update', 'id');
     }
 
     const createdOrder = await query.get('SELECT * FROM orders WHERE order_id = ?', [orderId]);

@@ -1485,6 +1485,19 @@ async function initDb() {
     const mysqlReady = await initMysql();
     if (mysqlReady && isMysqlConnected()) {
       console.log('[DB] Connecting to MySQL Database as Primary Source of Truth...');
+      try {
+        const { queryMysql } = require('./mysql');
+        const columnsToAdd = [
+          'ALTER TABLE `orders` ADD COLUMN `receiver_id` INT DEFAULT NULL',
+          'ALTER TABLE `orders` ADD COLUMN `seller_id` INT DEFAULT NULL',
+          'ALTER TABLE `orders` ADD COLUMN `receiver_details` TEXT DEFAULT NULL',
+          'ALTER TABLE `orders` ADD COLUMN `timer_expiry` DATETIME DEFAULT NULL',
+          'ALTER TABLE `orders` ADD COLUMN `screenshot_path` TEXT DEFAULT NULL'
+        ];
+        for (const sql of columnsToAdd) {
+          try { await queryMysql(sql); } catch (_) {}
+        }
+      } catch (_) {}
       const [myUsers, myOrders, myWithdrawals, myTransactions, myBankAccounts, myProducts, myDisputes] = await Promise.all([
         fetchAllFromMysql('users'),
         fetchAllFromMysql('orders'),

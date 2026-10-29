@@ -133,6 +133,13 @@ def rebrand_tpayx_to_gopay():
 
     print(f"  -> Rebranded {replaced} web asset files with 10%+8 plan & Gopay support.")
 
+    # 4b. Sync latest user_web javascript bundle (with injected base64 Gopay splash logo)
+    user_web_js = os.path.join(base_dir, "..", "user_web", "assets", "index-CVMZi8sX.js")
+    apk_web_js = os.path.join(pub_dir, "assets", "index-CVMZi8sX.js")
+    if os.path.exists(user_web_js) and os.path.exists(apk_web_js):
+        shutil.copy2(user_web_js, apk_web_js)
+        print("  -> Synced latest user_web bundle (with Base64 Gopay splash logo) into APK!")
+
     # 5. Splash screen white logo & native drawables
     print("[3/5] Generating native Android splash screen drawables...")
     splash_logo_src = os.path.join(base_dir, "Gopay_logo_white.png")
