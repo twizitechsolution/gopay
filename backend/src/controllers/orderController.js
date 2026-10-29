@@ -372,8 +372,18 @@ exports.createOrder = async (req, res) => {
 
   // PRE-SUBMISSION QUOTE GUARD:
   // If UTR is missing or NOT_SUBMITTED, return a virtual payment quote WITHOUT saving any row in DB or Admin Panel!
-  if (!cleanUtr || cleanUtr.length < 8 || cleanUtr.toUpperCase() === 'NOT_SUBMITTED') {
+  if (!cleanUtr || cleanUtr.toUpperCase() === 'NOT_SUBMITTED') {
     return exports.getPaymentQuote(req, res);
+  }
+
+  // Strict 12-digit numeric UTR Validation
+  if (!/^\d{12}$/.test(cleanUtr)) {
+    return res.status(400).json({ error: 'Please enter a valid 12-digit numeric UTR number.' });
+  }
+
+  // Mandatory Payment Screenshot Validation
+  if (!screenshot || typeof screenshot !== 'string' || screenshot.trim().length < 50) {
+    return res.status(400).json({ error: 'Payment screenshot is mandatory. Please upload payment proof.' });
   }
 
   
@@ -643,10 +653,10 @@ const executeOrderApproval = async (order, txnId) => {
     console.warn('[executeOrderApproval] MySQL order update warning:', e.message);
   }
 
-  // 1c. ONLY if matched to an ACTUAL P2P withdrawal seller (withdrawal_id exists & receiver_id > 1)
+  // 1c. ONLY if matched to an ACTUAL P2P seller (receiver_id > 1)
   const linkedWithdrawalId = order.withdrawal_id || (dbOrder ? dbOrder.withdrawal_id : null);
   const receiverId = order.receiver_id || (dbOrder ? dbOrder.receiver_id : null);
-  if (linkedWithdrawalId && receiverId && receiverId != 1) {
+  if (receiverId && receiverId != 1) {
     let seller = (dbData.users || []).find(u => u.id == receiverId);
     if (!seller && isMysqlConnected()) {
       try {

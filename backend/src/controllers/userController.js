@@ -84,9 +84,12 @@ exports.completeTask = async (req, res) => {
   }
 
   try {
-    const task = await query.get('SELECT completed FROM user_tasks WHERE user_id = ? AND task_key = ?', [userId, taskKey]);
+    let task = await query.get('SELECT completed FROM user_tasks WHERE user_id = ? AND task_key = ?', [userId, taskKey]);
     if (!task) {
-      return res.status(404).json({ error: 'Task tracker not found' });
+      try {
+        await query.run('INSERT INTO user_tasks (user_id, task_key, completed) VALUES (?, ?, 0)', [userId, taskKey]);
+      } catch (_) {}
+      task = { completed: 0 };
     }
 
     if (task.completed === 0) {

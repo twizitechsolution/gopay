@@ -52,7 +52,6 @@ def rebrand_tpayx_to_gopay():
         try:
             with open(cap_cfg, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
-            # Retain appId matching AndroidManifest.xml (com.tpayx.app)
             cfg["appId"] = "com.tpayx.app"
             cfg["appName"] = "Gopay"
             if "plugins" in cfg and "CapacitorHttp" in cfg["plugins"]:
@@ -77,17 +76,38 @@ def rebrand_tpayx_to_gopay():
         except Exception as e:
             print(f"  -> Error updating resources.arsc: {e}")
 
-    # 4. Replace branding in assets/public
-    print("[2/5] Replacing branding & backend URLs in bundled assets...")
+    # 4. Replace branding, reward plans, support, and validations in assets/public
+    print("[2/5] Replacing branding, reward plan & support text in bundled assets...")
     pub_dir = os.path.join(temp_dir, "assets", "public")
     replaced = 0
 
     replacements = [
+        # Reward plan display
+        ("2.5% + 6", "10% + 8"),
+        ("2.5% + ₹6", "10% + ₹8"),
+        ("2.5%+6", "10%+8"),
+        ("\\u20b910256", "\\u20b911008"),
+        ("\\u20B910256", "\\u20B911008"),
+        ("₹10256", "₹11008"),
+        # Support text
+        ("TPX Support", "Gopay Support"),
+        ("Tpay support", "Gopay Support"),
+        ("Tpay Support", "Gopay Support"),
+        ('children:"T"}),(0,G.jsx)("div",{className:"absolute bottom-0 right-0 w-4 h-4 bg-green-500',
+         'children:"G"}),(0,G.jsx)("div",{className:"absolute bottom-0 right-0 w-4 h-4 bg-green-500'),
+        # UTR validation in deposit modal
+        ("if(!i){r(`Please enter your transaction UTR reference`);return}",
+         "if(!i||!/^\\d{12}$/.test(i)){r(`Please enter a valid 12-digit UTR number`);return}"),
+        # Brand URLs and mentions
         ("https://tpayx.us.cc/api", "https://gopay.us.cc/api"),
         ("http://tpayx.us.cc/api", "https://gopay.us.cc/api"),
         ("tpayx.us.cc", "gopay.us.cc"),
         ("https://t.me/TpayX", "https://t.me/Gopay"),
         ("https://t.me/tpayx", "https://t.me/Gopay"),
+        ("tpayx_telegram_link", "gopay_telegram_link"),
+        ("tpayx_telegram_user", "gopay_telegram_user"),
+        ("@TpayX", "@Gopay"),
+        ("@tpayx", "@Gopay"),
         ("TpayX", "Gopay"),
         ("tpayx", "gopay"),
         ("TPAYX", "GOPAY"),
@@ -111,11 +131,13 @@ def rebrand_tpayx_to_gopay():
                 except Exception as e:
                     pass
 
-    print(f"  -> Rebranded {replaced} web asset files.")
+    print(f"  -> Rebranded {replaced} web asset files with 10%+8 plan & Gopay support.")
 
-    # 5. Splash screen white logo
-    splash_logo = os.path.join(base_dir, "Gopay_logo_white.png")
-    if os.path.exists(splash_logo):
+    # 5. Splash screen white logo & native drawables
+    print("[3/5] Generating native Android splash screen drawables...")
+    splash_logo_src = os.path.join(base_dir, "Gopay_logo_white.png")
+    if os.path.exists(splash_logo_src):
+        # 5a. Replace web-asset white logos
         for splash_name in [
             "tpayx_logo_white.png",
             "Gopay_logo_white.png",
@@ -127,17 +149,51 @@ def rebrand_tpayx_to_gopay():
                 os.path.join(temp_dir, "assets", "public", "assets", splash_name),
             ]:
                 if os.path.exists(os.path.dirname(target_loc)):
-                    shutil.copy2(splash_logo, target_loc)
-        print("  -> Injected official Gopay white splash logo.")
+                    shutil.copy2(splash_logo_src, target_loc)
+        
+        # 5b. Generate native Android splash screens (res/drawable-*/splash.png)
+        # Background: #0f172a (15, 23, 42, 255) - exact Gopay dark slate navy!
+        splash_img = Image.open(splash_logo_src).convert('RGBA')
+        s_bbox = splash_img.getbbox()
+        if s_bbox:
+            splash_crop = splash_img.crop(s_bbox)
+        else:
+            splash_crop = splash_img
+
+        res_dir = os.path.join(temp_dir, "res")
+        for root, dirs, files in os.walk(res_dir):
+            for file in files:
+                if file.lower() == 'splash.png':
+                    sp_path = os.path.join(root, file)
+                    try:
+                        with Image.open(sp_path) as orig_sp:
+                            w, h = orig_sp.size
+
+                        canvas = Image.new('RGBA', (w, h), (15, 23, 42, 255))
+                        
+                        # Scale logo to ~52% width of canvas (max 22% of height)
+                        max_w = int(w * 0.52)
+                        max_h = int(h * 0.22)
+                        scale = min(max_w / splash_crop.width, max_h / splash_crop.height)
+                        target_w = max(1, int(splash_crop.width * scale))
+                        target_h = max(1, int(splash_crop.height * scale))
+                        
+                        logo_resized = splash_crop.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                        pos_x = (w - target_w) // 2
+                        pos_y = (h - target_h) // 2
+                        canvas.paste(logo_resized, (pos_x, pos_y), logo_resized)
+                        canvas.save(sp_path, 'PNG')
+                    except Exception as err:
+                        print(f"  -> Warning updating splash {sp_path}: {err}")
+        print("  -> Injected official Gopay white splash logo into all native Android drawables.")
 
     # 6. Generate and replace app launcher icons for all densities
-    print("[3/5] Generating launcher & adaptive icons from gopay_user_icon.png...")
+    print("[4/5] Generating launcher & adaptive icons from gopay_user_icon.png...")
     icon_src = os.path.join(base_dir, "gopay_user_icon.png")
     src_img = Image.open(icon_src).convert('RGBA')
     bbox = src_img.getbbox()
     content = src_img.crop(bbox)
 
-    # Master classic icon (512x512) with transparent breathing margin
     master_classic = Image.new('RGBA', (512, 512), (0, 0, 0, 0))
     classic_target = int(512 * 0.88)
     content_scaled = content.resize((classic_target, classic_target), Image.Resampling.LANCZOS)
@@ -157,19 +213,16 @@ def rebrand_tpayx_to_gopay():
         'mipmap-xxxhdpi-v4': (192, 432),
     }
 
-    res_dir = os.path.join(temp_dir, "res")
     if os.path.exists(res_dir):
         for folder, (l_size, fg_size) in densities.items():
             fpath = os.path.join(res_dir, folder)
             if not os.path.exists(fpath):
                 continue
-            # Classic & round icons
             l_img = master_classic.resize((l_size, l_size), Image.Resampling.LANCZOS)
             l_img.save(os.path.join(fpath, 'ic_launcher.png'), 'PNG')
             l_img.save(os.path.join(fpath, 'ic_launcher_round.png'), 'PNG')
 
-            # Adaptive foreground (65% safe zone) on opaque Gopay blue background (1, 59, 228, 255)
-            # Guarantees ZERO white corners or patches on all Android launchers!
+            # Adaptive foreground on opaque Gopay blue background
             fg_canvas = Image.new('RGBA', (fg_size, fg_size), (1, 59, 228, 255))
             fg_inner = int(fg_size * 0.65)
             fg_content = content.resize((fg_inner, fg_inner), Image.Resampling.LANCZOS)
@@ -178,7 +231,7 @@ def rebrand_tpayx_to_gopay():
             fg_canvas.save(os.path.join(fpath, 'ic_launcher_foreground.png'), 'PNG')
         print("  -> Launcher icons generated successfully for all mipmaps.")
 
-    # Remove any stray vector foregrounds if they exist
+    # Remove any stray vector foregrounds
     for legacy_xml in [
         os.path.join(temp_dir, "res", "drawable-v24", "ic_launcher_foreground.xml"),
         os.path.join(temp_dir, "res", "drawable-v24", "$ic_launcher_foreground__0.xml"),
@@ -187,7 +240,7 @@ def rebrand_tpayx_to_gopay():
             os.remove(legacy_xml)
 
     # 7. Repack APK
-    print("[4/5] Repacking into unaligned APK...")
+    print("[5/5] Repacking into unaligned APK...")
     if os.path.exists(unaligned_apk):
         os.remove(unaligned_apk)
 
@@ -211,7 +264,7 @@ def rebrand_tpayx_to_gopay():
     zipalign_bin = os.path.join(tools_dir, "zipalign.exe")
     apksigner_bat = os.path.join(tools_dir, "apksigner.bat")
 
-    print("[5/5] Aligning & Signing APK...")
+    print("Aligning & Signing APK...")
     if os.path.exists(output_apk):
         os.remove(output_apk)
     subprocess.run([zipalign_bin, "-p", "-f", "4", unaligned_apk, output_apk], check=True)

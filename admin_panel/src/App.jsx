@@ -1459,7 +1459,6 @@ const Dashboard = ({ token, handleLogout, activeTab, theme }) => {
                   <th className="px-6 py-4">User Mobile</th>
                   <th className="px-6 py-4">Reference/Asset</th>
                   <th className="px-6 py-4">Receiver Details</th>
-                  <th className="px-6 py-4">Account Details</th>
                   <th className="px-6 py-4 text-center">15-Min Timer</th>
                   <th className="px-6 py-4">Amount</th>
                   <th className="px-6 py-4 text-center">Status</th>
@@ -1469,7 +1468,7 @@ const Dashboard = ({ token, handleLogout, activeTab, theme }) => {
               <tbody className="divide-y divide-[#1b1c34]/40">
                 {paginatedOrders.length === 0 ? (
                   <tr>
-                    <td colSpan="9" className="text-center py-12 text-slate-500 font-bold uppercase tracking-wider">
+                    <td colSpan="8" className="text-center py-12 text-slate-500 font-bold uppercase tracking-wider">
                       {orders.length === 0 ? 'No deposit orders found in database.' : 'No deposit orders match the filter / search criteria.'}
                     </td>
                   </tr>
@@ -1506,18 +1505,27 @@ const Dashboard = ({ token, handleLogout, activeTab, theme }) => {
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <span className={`font-bold block ${theme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'}`}>{order.receiver_mobile || '8763527330'}</span>
-                        <span className="text-[10px] text-slate-500 font-mono block mt-0.5">UID: {order.receiver_uid || 'M118248'}</span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="space-y-0.5 text-[11px]">
-                          <span className={`font-bold block ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>{order.receiver_name || 'Tushar Admin'}</span>
-                          <span className="text-slate-400 text-[10px] block leading-tight">
-                            {order.receiver_bank || 'HDFC Bank'} (A/C: {order.receiver_account || 'N/A'})
-                          </span>
-                          <span className="text-cyan-400 font-mono text-[10px] block font-semibold">
-                            UPI: {order.receiver_upi || '8763527330@upi'}
-                          </span>
+                        <div className="space-y-1 text-[11px]">
+                          <div className={`font-extrabold text-[12px] flex items-center gap-1.5 ${theme === 'dark' ? 'text-blue-400' : 'text-blue-600'}`}>
+                            <i className="fas fa-university text-[10px]" />
+                            <span>{order.receiver_bank || 'Bank'}</span>
+                          </div>
+                          <div className="text-slate-300 font-mono text-[11px] font-semibold flex items-center gap-1.5">
+                            <i className="fas fa-credit-card text-[9px] text-slate-400" />
+                            <span>A/C: {order.receiver_account || 'N/A'}</span>
+                          </div>
+                          <div className="text-cyan-400 font-mono text-[11px] font-bold flex items-center gap-1.5">
+                            <i className="fas fa-qrcode text-[9px]" />
+                            <span>UPI: {order.receiver_upi || 'N/A'}</span>
+                          </div>
+                          <div className="text-emerald-400 font-semibold text-[11px] flex items-center gap-1.5">
+                            <i className="fas fa-phone-alt text-[9px]" />
+                            <span>Mob: {order.receiver_mobile || 'N/A'}</span>
+                          </div>
+                          <div className="text-slate-400 font-mono text-[10px] flex items-center gap-1.5">
+                            <i className="fas fa-id-badge text-[9px]" />
+                            <span>UID: {order.receiver_uid || 'N/A'}</span>
+                          </div>
                         </div>
                       </td>
                       <td className="px-6 py-4 text-center">
