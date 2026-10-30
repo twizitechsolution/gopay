@@ -154,6 +154,20 @@ def rebrand_tpayx_to_gopay():
                                             "path:`/`,element:(0,G.jsx)(zo,{})")
                             print("  -> Configured root path to unconditionally render Splash Screen (zo).")
 
+                        # Fix price range tab filter
+                        old_filter = 'ze=f.filter(e=>{if(o!==`all`){let t=m.find(e=>e.id===o);if(t&&(e.amount<t.min_val||e.amount>t.max_val))return!1}return!je.includes(e.id)})'
+                        new_filter = 'ze=f.filter(e=>{if(o!==`all`){let t=m.find(x=>String(x.id)===String(o));if(t&&(Number(e.amount)<Number(t.min_val)||Number(e.amount)>Number(t.max_val)))return!1}return!je.includes(e.id)})'
+                        if old_filter in nc:
+                            nc = nc.replace(old_filter, new_filter)
+                            print("  -> Fixed price range tab filtering logic.")
+
+                        # Prioritize small orders first under All tab
+                        old_xo = 'Xo=e=>{if(e.length===0)return[];let t=Jo(2,Math.min(6,e.length));return Yo(e).slice(0,t)}'
+                        new_xo = 'Xo=e=>{if(e.length===0)return[];let s=[...e].sort((a,b)=>Number(a.amount)-Number(b.amount));let t=Jo(3,Math.min(6,s.length));return s.slice(0,t)}'
+                        if old_xo in nc:
+                            nc = nc.replace(old_xo, new_xo)
+                            print("  -> Prioritized smaller orders first in native bundle.")
+
                     # Apply general text and API replacements
                     for old_val, new_val in replacements:
                         nc = nc.replace(old_val, new_val)

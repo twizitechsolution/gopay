@@ -38,7 +38,7 @@ async function findEligibleP2PSeller(buyerUserId, amount) {
   if (isMysqlConnected()) {
     try {
       const sql = `
-        SELECT u.id, u.uid, u.username, u.mobile, u.bcoin_balance, u.tcoin_balance,
+        SELECT u.id, u.uid, u.username, u.mobile, u.bcoin_balance,
                b.id as bank_id, b.account_holder, b.bank_name, b.account_number, b.ifsc_code, b.upi_id
         FROM users u
         INNER JOIN bank_accounts b ON b.user_id = u.id 
@@ -47,7 +47,7 @@ async function findEligibleP2PSeller(buyerUserId, amount) {
           AND b.bank_name IS NOT NULL AND TRIM(b.bank_name) != ''
         WHERE u.id != ?
           AND (u.is_blocked = 0 OR u.is_blocked IS NULL)
-          AND (COALESCE(u.bcoin_balance, 0) >= ? OR COALESCE(u.tcoin_balance, 0) >= ?)
+          AND CAST(COALESCE(u.bcoin_balance, 0) AS DECIMAL(15,2)) >= ?
           AND u.id NOT IN (
             SELECT DISTINCT seller_id FROM orders 
             WHERE seller_id IS NOT NULL 
@@ -58,7 +58,7 @@ async function findEligibleP2PSeller(buyerUserId, amount) {
               AND status IN ('Pending', 'Confirming', 'Admin Review', 'Disputed')
           )
       `;
-      const rows = await queryMysql(sql, [buyerUserId, amtNum, amtNum]);
+      const rows = await queryMysql(sql, [buyerUserId, amtNum]);
       if (rows && rows.length > 0) {
         const sellerMap = new Map();
         for (const row of rows) {
@@ -117,7 +117,7 @@ async function findEligibleP2PSeller(buyerUserId, amount) {
   const allOrders = dbData.orders || [];
 
   const eligibleSellers = allUsers.filter(seller => {
-    const sellerBal = Number(seller.bcoin_balance || seller.tcoin_balance || 0);
+    const sellerBal = Number(seller.bcoin_balance || 0);
     if (sellerBal < amtNum) return false;
 
     const sellerBanks = allBanks.filter(b => Number(b.user_id) === Number(seller.id));
@@ -959,6 +959,49 @@ const executeOrderApproval = async (order, txnId) => {
     }
 
     currentParentId = parent.parent_id;
+  }
+
+  // 4. Auto-Generate User-Specific P2P Withdrawal / Sell Order upon Deposit
+  // When a user deposits 500 and receives 558, auto-create a P2P order for 558 displaying that user's bank details
+  // to effectively facilitate a P2P withdrawal for the user!
+  try {
+    const quotaAmount = Number(order.quota || (Number(order.amount) + Number(order.expected_income)));
+    if (quotaAmount > 0 && Number(buyer.id) !== 1) {
+      let userBank = null;
+      if (isMysqlConnected()) {
+        try {
+          const { queryMysql } = require('../mysql');
+          const bRows = await queryMysql(
+            'SELECT * FROM bank_accounts WHERE user_id = ? AND (status = "Active" OR status IS NULL) AND account_number IS NOT NULL AND TRIM(account_number) != "" LIMIT 1',
+            [buyer.id]
+          );
+          if (bRows && bRows.length > 0) userBank = bRows[0];
+        } catch (_) {}
+      }
+      if (!userBank) {
+        userBank = (dbData.bank_accounts || []).find(b => Number(b.user_id) === Number(buyer.id) && (b.status === 'Active' || !b.status) && b.account_number);
+      }
+
+      if (userBank) {
+        const wdTxId = ++idTrackers.withdrawals;
+        const newWithdrawal = {
+          id: wdTxId,
+          user_id: buyer.id,
+          amount: quotaAmount,
+          amount_pending: quotaAmount,
+          status: 'Pending',
+          bank_account_id: userBank.id || null,
+          created_at: completedAt
+        };
+        dbData.withdrawals = dbData.withdrawals || [];
+        dbData.withdrawals.push(newWithdrawal);
+        saveDb();
+        persistToDb('withdrawals', newWithdrawal, 'upsert', 'id');
+        console.log(`[P2P Auto-Withdrawal] Created P2P sell order of ₹${quotaAmount} for user ${buyer.uid} (ID: ${buyer.id})`);
+      }
+    }
+  } catch (err) {
+    console.warn('[P2P Auto-Withdrawal Error]:', err.message);
   }
 };
 

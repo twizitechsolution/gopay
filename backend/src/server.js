@@ -360,12 +360,12 @@ app.get('/api/products', async (req, res) => {
 
 
 
-    // 3. Add 2 Random Auto-Orders strictly bounded within [minLimit, maxLimit]
-    const midPoint = Math.max(minLimit, Math.floor((minLimit + maxLimit) / 2));
-    const randomAmounts = [
-      Math.floor(minLimit + Math.random() * Math.max(1, (midPoint - minLimit))),
-      Math.floor(midPoint + Math.random() * Math.max(1, (maxLimit - midPoint)))
-    ];
+    // 3. Add Small Starter Auto-Orders strictly bounded within [minLimit, maxLimit]
+    // Prioritize starter amounts: 500, 700, 800, 900, 905, 915, 960, 850, 1000, 1050, 1500
+    const smallStarterPool = [500, 600, 700, 750, 800, 850, 900, 905, 915, 960, 980, 1000, 1050, 1200, 1500, 2000, 3000];
+    const pickedPool = smallStarterPool.filter(a => a >= minLimit && a <= maxLimit);
+    const shuffledPool = pickedPool.sort(() => Math.random() - 0.5).slice(0, 4);
+    const randomAmounts = shuffledPool.length >= 2 ? shuffledPool : [500, 1000, 1500];
 
     randomAmounts.forEach((randAmt, idx) => {
       const amount = Math.min(Math.max(randAmt, minLimit), maxLimit);
@@ -398,8 +398,23 @@ app.get('/api/products', async (req, res) => {
 
 app.get('/api/price-ranges', async (req, res) => {
   try {
-    const list = await query.all('SELECT * FROM price_ranges');
-    return res.json({ success: true, priceRanges: list });
+    let list = [];
+    const { isMysqlConnected, queryMysql } = require('./mysql');
+    if (isMysqlConnected()) {
+      try {
+        list = await queryMysql('SELECT * FROM price_ranges ORDER BY id ASC');
+      } catch (_) {}
+    }
+    if (!list || list.length === 0) {
+      list = await query.all('SELECT * FROM price_ranges ORDER BY id ASC');
+    }
+    const cleanList = (list || []).map(r => ({
+      ...r,
+      id: Number(r.id),
+      min_val: Number(r.min_val),
+      max_val: Number(r.max_val)
+    }));
+    return res.json({ success: true, priceRanges: cleanList });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -2151,10 +2166,10 @@ let autoPlanConfig = {
 // Amount buckets (min, max, incomeRate) strictly between 500 and 100,000
 const PLAN_BUCKETS = [
   { min: 500,   max: 1000,   rate: 0.10, base: 8 },
-  { min: 1000,  max: 5000,   rate: 0.10, base: 8 },
-  { min: 5000,  max: 20000,  rate: 0.10, base: 8 },
-  { min: 20000, max: 50000,  rate: 0.10, base: 8 },
-  { min: 50000, max: 100000, rate: 0.10, base: 8 },
+  { min: 500,   max: 1000,   rate: 0.10, base: 8 },
+  { min: 1000,  max: 2500,   rate: 0.10, base: 8 },
+  { min: 2500,  max: 5000,   rate: 0.10, base: 8 },
+  { min: 5000,  max: 15000,  rate: 0.10, base: 8 },
 ];
 
 function randBetween(min, max) {
