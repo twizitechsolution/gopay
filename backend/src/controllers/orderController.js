@@ -19,9 +19,142 @@ function generateOrderId(prefix) {
 const https = require('https');
 const crypto = require('crypto');
 
-// In-memory active quotes map to lock sellers for the 15-minute quote window
+// In-memory active quotes map
 const activeQuotes = new Map();
 exports.activeQuotes = activeQuotes;
+
+// Strict P2P Seller Matcher:
+// 1. Prioritize registered users with Tcoin wallet balance (bcoin_balance / tcoin_balance) >= amount
+// 2. User MUST have active bank details (account_number + bank_name)
+// 3. Buyer strictly cannot match with their own account
+// 4. Exclude blocked users
+// 5. Exclude sellers with active pending orders (Pending, Confirming, Admin Review, Disputed)
+// 6. Fair randomization across all eligible sellers and their bank accounts
+// 7. Returns null ONLY if no eligible user with sufficient balance & bank details is found
+async function findEligibleP2PSeller(buyerUserId, amount) {
+  const amtNum = Number(amount);
+  const { isMysqlConnected, queryMysql } = require('../mysql');
+
+  if (isMysqlConnected()) {
+    try {
+      const sql = `
+        SELECT u.id, u.uid, u.username, u.mobile, u.bcoin_balance, u.tcoin_balance,
+               b.id as bank_id, b.account_holder, b.bank_name, b.account_number, b.ifsc_code, b.upi_id
+        FROM users u
+        INNER JOIN bank_accounts b ON b.user_id = u.id 
+          AND (b.status = 'Active' OR b.status IS NULL)
+          AND b.account_number IS NOT NULL AND TRIM(b.account_number) != ''
+          AND b.bank_name IS NOT NULL AND TRIM(b.bank_name) != ''
+        WHERE u.id != ?
+          AND (u.is_blocked = 0 OR u.is_blocked IS NULL)
+          AND (COALESCE(u.bcoin_balance, 0) >= ? OR COALESCE(u.tcoin_balance, 0) >= ?)
+          AND u.id NOT IN (
+            SELECT DISTINCT seller_id FROM orders 
+            WHERE seller_id IS NOT NULL 
+              AND status IN ('Pending', 'Confirming', 'Admin Review', 'Disputed')
+            UNION
+            SELECT DISTINCT receiver_id FROM orders 
+            WHERE receiver_id IS NOT NULL 
+              AND status IN ('Pending', 'Confirming', 'Admin Review', 'Disputed')
+          )
+      `;
+      const rows = await queryMysql(sql, [buyerUserId, amtNum, amtNum]);
+      if (rows && rows.length > 0) {
+        const sellerMap = new Map();
+        for (const row of rows) {
+          if (!sellerMap.has(row.id)) {
+            sellerMap.set(row.id, {
+              id: row.id,
+              uid: row.uid,
+              username: row.username,
+              mobile: row.mobile,
+              banks: []
+            });
+          }
+          sellerMap.get(row.id).banks.push({
+            id: row.bank_id,
+            account_holder: row.account_holder,
+            bank_name: row.bank_name,
+            account_number: row.account_number,
+            ifsc_code: row.ifsc_code,
+            upi_id: row.upi_id
+          });
+        }
+
+        const eligibleList = Array.from(sellerMap.values());
+        const selectedSeller = eligibleList[Math.floor(Math.random() * eligibleList.length)];
+        const selectedBank = selectedSeller.banks[Math.floor(Math.random() * selectedSeller.banks.length)];
+
+        const fallbackUpi = selectedSeller.mobile ? selectedSeller.mobile + '@upi' : 'merchant@upi';
+        return {
+          sellerId: selectedSeller.id,
+          receiverDetails: {
+            receiver_name: selectedBank.account_holder || selectedSeller.username || 'P2P Seller',
+            bank_name: selectedBank.bank_name,
+            account_number: selectedBank.account_number,
+            ifsc_code: selectedBank.ifsc_code || 'N/A',
+            upi_id: selectedBank.upi_id || fallbackUpi,
+            mobile: selectedSeller.mobile || 'N/A',
+            user_id: selectedSeller.id,
+            uid: selectedSeller.uid || 'N/A'
+          }
+        };
+      }
+    } catch (err) {
+      console.error('[P2P Matcher] MySQL query error:', err.message);
+    }
+  }
+
+  // In-memory fallback (strictly filtered with zero orphan banks)
+  loadDb();
+  const allUsers = (dbData.users || []).filter(u => Number(u.id) !== Number(buyerUserId) && !u.is_blocked);
+  const validUserIds = new Set(allUsers.map(u => Number(u.id)));
+  const allBanks = (dbData.bank_accounts || []).filter(b => 
+    validUserIds.has(Number(b.user_id)) && 
+    (b.status === 'Active' || !b.status) &&
+    b.account_number && b.bank_name
+  );
+  const allOrders = dbData.orders || [];
+
+  const eligibleSellers = allUsers.filter(seller => {
+    const sellerBal = Number(seller.bcoin_balance || seller.tcoin_balance || 0);
+    if (sellerBal < amtNum) return false;
+
+    const sellerBanks = allBanks.filter(b => Number(b.user_id) === Number(seller.id));
+    if (sellerBanks.length === 0) return false;
+
+    const hasPendingOrder = allOrders.some(o => 
+      (Number(o.seller_id) === Number(seller.id) || Number(o.receiver_id) === Number(seller.id)) &&
+      ['Pending', 'Confirming', 'Admin Review', 'Disputed'].includes(o.status)
+    );
+    if (hasPendingOrder) return false;
+
+    return true;
+  });
+
+  if (eligibleSellers.length > 0) {
+    const selectedSeller = eligibleSellers[Math.floor(Math.random() * eligibleSellers.length)];
+    const sellerBanks = allBanks.filter(b => Number(b.user_id) === Number(selectedSeller.id));
+    const selectedBank = sellerBanks[Math.floor(Math.random() * sellerBanks.length)];
+    const fallbackUpi = selectedSeller.mobile ? selectedSeller.mobile + '@upi' : 'merchant@upi';
+
+    return {
+      sellerId: selectedSeller.id,
+      receiverDetails: {
+        receiver_name: selectedBank.account_holder || selectedSeller.username || 'P2P Seller',
+        bank_name: selectedBank.bank_name,
+        account_number: selectedBank.account_number,
+        ifsc_code: selectedBank.ifsc_code || 'N/A',
+        upi_id: selectedBank.upi_id || fallbackUpi,
+        mobile: selectedSeller.mobile || 'N/A',
+        user_id: selectedSeller.id,
+        uid: selectedSeller.uid || 'N/A'
+      }
+    };
+  }
+
+  return null;
+}
 
 async function winpeyCreatePayment(orderId, amount, username, origin) {
   const config = await query.get('SELECT * FROM settings LIMIT 1');
@@ -201,104 +334,17 @@ exports.getPaymentQuote = async (req, res) => {
 
     if (assetType === 'INR') {
       loadDb();
+      timerExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-      // Clean up any expired quotes from activeQuotes map
-      const nowMs = Date.now();
-      for (const [key, q] of activeQuotes.entries()) {
-        if (!q.timerExpiry || nowMs > new Date(q.timerExpiry).getTime()) {
-          activeQuotes.delete(key);
-        }
-      }
+      // Find eligible P2P seller strictly (prioritize real users with Tcoin balance & active bank):
+      const matched = await findEligibleP2PSeller(userId, amtNum);
 
-      // Fetch fresh records from MySQL if available, else in-memory dbData
-      let allUsers = [];
-      let allBanks = [];
-      let allOrders = [];
-      try {
-        const { isMysqlConnected, fetchAllFromMysql } = require('../mysql');
-        if (isMysqlConnected()) {
-          allUsers = await fetchAllFromMysql('users', 10000);
-          allBanks = await fetchAllFromMysql('bank_accounts', 10000);
-          allOrders = await fetchAllFromMysql('orders', 5000);
-        }
-      } catch (err) {}
-
-      if (!allUsers || allUsers.length === 0) allUsers = dbData.users || [];
-      if (!allBanks || allBanks.length === 0) allBanks = dbData.bank_accounts || [];
-      if (!allOrders || allOrders.length === 0) allOrders = dbData.orders || [];
-
-      // Find eligible P2P sellers:
-      // 1. Registered user with bcoin_balance (or tcoin_balance) >= recharge amount
-      // 2. Not the buyer themselves (strictly excluded)
-      // 3. User is not blocked
-      // 4. Must have at least one active bank account with bank name and account number
-      // 5. Must NOT have any active/pending orders assigned as seller/receiver (Pending, Confirming, Admin Review, Disputed)
-      // 6. Must NOT have an active quote currently locked in memory
-      const eligibleSellers = allUsers.filter(seller => {
-        if (Number(seller.id) === Number(userId)) return false;
-        if (seller.is_blocked) return false;
-        const sellerBal = Number(seller.bcoin_balance || seller.tcoin_balance || 0);
-        if (sellerBal < amtNum) return false;
-
-        const sellerBanks = allBanks.filter(b => 
-          Number(b.user_id) === Number(seller.id) &&
-          (b.status === 'Active' || !b.status) &&
-          b.account_number && b.bank_name
-        );
-        if (sellerBanks.length === 0) return false;
-
-        const hasPendingOrder = allOrders.some(o => 
-          (Number(o.seller_id) === Number(seller.id) || Number(o.receiver_id) === Number(seller.id)) &&
-          ['Pending', 'Confirming', 'Admin Review', 'Disputed'].includes(o.status)
-        );
-        if (hasPendingOrder) return false;
-
-        const hasActiveQuote = Array.from(activeQuotes.values()).some(q => 
-          Number(q.receiverId) === Number(seller.id) && nowMs < new Date(q.timerExpiry).getTime()
-        );
-        if (hasActiveQuote) return false;
-
-        return true;
-      });
-
-      let matchedUser = null;
-      if (eligibleSellers.length > 0) {
-        // Uniform fair rotation / randomization across eligible sellers
-        const shuffled = [...eligibleSellers].sort(() => Math.random() - 0.5);
-        matchedUser = shuffled[0];
-      }
-
-      if (matchedUser) {
-        receiverId = matchedUser.id;
-        timerExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-
-        const activeBanks = allBanks.filter(b => 
-          Number(b.user_id) === Number(receiverId) &&
-          (b.status === 'Active' || !b.status) &&
-          b.account_number && b.bank_name
-        );
-        const bank = activeBanks.length > 0 
-          ? activeBanks[Math.floor(Math.random() * activeBanks.length)]
-          : {};
-
-        const receiverUser = matchedUser;
-        const fallbackUpi = receiverUser.mobile ? (receiverUser.mobile + '@upi') : 'merchant@upi';
-
-        receiverDetails = {
-          receiver_name: bank.account_holder || receiverUser.username || 'P2P Seller',
-          bank_name: bank.bank_name || 'Bank',
-          account_number: bank.account_number || 'N/A',
-          ifsc_code: bank.ifsc_code || 'N/A',
-          upi_id: bank.upi_id || fallbackUpi,
-          mobile: receiverUser.mobile || 'N/A',
-          user_id: receiverUser.id,
-          uid: receiverUser.uid || 'N/A'
-        };
+      if (matched && matched.receiverDetails) {
+        receiverId = matched.sellerId;
+        receiverDetails = matched.receiverDetails;
       } else {
-        // Fallback to Official Merchant
+        // Fallback to Official Merchant ONLY when no eligible user has sufficient balance or active bank account
         receiverId = null;
-        timerExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-
         const settings = dbData.settings || {};
         const upiList = settings.upi_ids ? settings.upi_ids.split(',').map(s => s.trim()).filter(Boolean) : [];
         const fallbackUpi = upiList.length > 0 ? upiList[Math.floor(Math.random() * upiList.length)] : 'Earnclub@apl';
@@ -519,27 +565,26 @@ exports.createOrder = async (req, res) => {
     // Build receiver details
     let receiverDetails = cachedQuote && cachedQuote.receiverDetails ? cachedQuote.receiverDetails : null;
     if (!receiverDetails && finalReceiverId) {
-      let allBanks = [];
-      let allUsers = [];
+      let bank = null;
+      let receiverUser = null;
       try {
-        const { isMysqlConnected, fetchAllFromMysql } = require('../mysql');
+        const { isMysqlConnected, fetchOneFromMysql, queryMysql } = require('../mysql');
         if (isMysqlConnected()) {
-          allBanks = await fetchAllFromMysql('bank_accounts', 10000);
-          allUsers = await fetchAllFromMysql('users', 10000);
+          receiverUser = await fetchOneFromMysql('users', 'id', finalReceiverId);
+          const bankRows = await queryMysql('SELECT * FROM bank_accounts WHERE user_id = ? AND (status = "Active" OR status IS NULL) AND account_number IS NOT NULL AND TRIM(account_number) != "" LIMIT 1', [finalReceiverId]);
+          bank = bankRows && bankRows.length > 0 ? bankRows[0] : null;
         }
       } catch (_) {}
-      if (!allBanks || allBanks.length === 0) allBanks = dbData.bank_accounts || [];
-      if (!allUsers || allUsers.length === 0) allUsers = dbData.users || [];
+      if (!receiverUser) receiverUser = (dbData.users || []).find(u => Number(u.id) === Number(finalReceiverId));
+      if (!bank) bank = (dbData.bank_accounts || []).find(b => Number(b.user_id) === Number(finalReceiverId) && (b.status === 'Active' || !b.status));
 
-      const bank = allBanks.find(b => Number(b.user_id) === Number(finalReceiverId) && (b.status === 'Active' || !b.status));
-      const receiverUser = allUsers.find(u => Number(u.id) === Number(finalReceiverId));
       if (bank && receiverUser) {
         receiverDetails = {
           receiver_name: bank.account_holder || receiverUser.username || 'P2P Seller',
           bank_name: bank.bank_name || 'Bank',
           account_number: bank.account_number || 'N/A',
           ifsc_code: bank.ifsc_code || 'N/A',
-          upi_id: bank.upi_id || (receiverUser.mobile + '@upi'),
+          upi_id: bank.upi_id || (receiverUser.mobile ? `${receiverUser.mobile}@upi` : 'merchant@upi'),
           mobile: receiverUser.mobile || 'N/A',
           user_id: receiverUser.id,
           uid: receiverUser.uid || 'N/A'
