@@ -4,6 +4,8 @@ import shutil
 import zipfile
 import subprocess
 import json
+import base64
+import re
 from PIL import Image
 
 def rebrand_tpayx_to_gopay():
@@ -18,7 +20,7 @@ def rebrand_tpayx_to_gopay():
     storepass = "release123"
 
     print("==================================================")
-    print("  Rebranding TpayX.apk -> Gopay.apk")
+    print("  Rebranding TpayX.apk -> Gopay.apk (Native App)")
     print(f"  Source: {source_apk}")
     print(f"  Target: {output_apk}")
     print("==================================================")
@@ -76,43 +78,52 @@ def rebrand_tpayx_to_gopay():
         except Exception as e:
             print(f"  -> Error updating resources.arsc: {e}")
 
-    # 4. Replace branding, reward plans, support, and validations in assets/public
-    print("[2/5] Replacing branding, reward plan & support text in bundled assets...")
+    # 4. Modify bundled native web assets directly in temp_dir/assets/public
+    print("[2/5] Injecting Gopay white logo & configuring Native App Router in bundled assets...")
     pub_dir = os.path.join(temp_dir, "assets", "public")
-    replaced = 0
+    
+    # 4a. Base64 Gopay White Logo
+    splash_logo_src = os.path.join(base_dir, "Gopay_logo_white.png")
+    gopay_b64 = ""
+    if os.path.exists(splash_logo_src):
+        with open(splash_logo_src, "rb") as f:
+            gopay_b64 = base64.b64encode(f.read()).decode("utf-8")
 
+    # 4b. String replacements for native app bundle
     replacements = [
         # Reward plan display
         ("2.5% + 6", "10% + 8"),
-        ("2.5% + ₹6", "10% + ₹8"),
+        ("2.5% + \u20b96", "10% + \u20b98"),
         ("2.5%+6", "10%+8"),
         ("\\u20b910256", "\\u20b911008"),
         ("\\u20B910256", "\\u20B911008"),
-        ("₹10256", "₹11008"),
-        # Support text
+        ("\u20b910256", "\u20b911008"),
+        # Support text & links
         ("TPX Support", "Gopay Support"),
         ("Tpay support", "Gopay Support"),
         ("Tpay Support", "Gopay Support"),
         ('children:"T"}),(0,G.jsx)("div",{className:"absolute bottom-0 right-0 w-4 h-4 bg-green-500',
          'children:"G"}),(0,G.jsx)("div",{className:"absolute bottom-0 right-0 w-4 h-4 bg-green-500'),
-        # UTR validation in deposit modal
-        ("if(!i){r(`Please enter your transaction UTR reference`);return}",
-         "if(!i||!/^\\d{12}$/.test(i)){r(`Please enter a valid 12-digit UTR number`);return}"),
-        # Brand URLs and mentions
-        ("https://tpayx.us.cc/api", "https://gopay.us.cc/api"),
-        ("http://tpayx.us.cc/api", "https://gopay.us.cc/api"),
-        ("tpayx.us.cc", "gopay.us.cc"),
         ("https://t.me/TpayX", "https://t.me/Gopay"),
         ("https://t.me/tpayx", "https://t.me/Gopay"),
         ("tpayx_telegram_link", "gopay_telegram_link"),
         ("tpayx_telegram_user", "gopay_telegram_user"),
         ("@TpayX", "@Gopay"),
         ("@tpayx", "@Gopay"),
+        # UTR validation in deposit modal
+        ("if(!i){r(`Please enter your transaction UTR reference`);return}",
+         "if(!i||!/^\\d{12}$/.test(i)){r(`Please enter a valid 12-digit numeric UTR number`);return}"),
+        # Brand URLs and mentions
+        ("https://tpayx.us.cc/api", "https://gopay.us.cc/api"),
+        ("http://tpayx.us.cc/api", "https://gopay.us.cc/api"),
+        ("tpayx.us.cc", "gopay.us.cc"),
+        ("Airwallex_token", "Gopay_token"),
         ("TpayX", "Gopay"),
         ("tpayx", "gopay"),
         ("TPAYX", "GOPAY"),
     ]
 
+    replaced_files = 0
     for root, dirs, files in os.walk(pub_dir):
         for f in files:
             if f.endswith(('.js', '.html', '.css', '.json')):
@@ -121,28 +132,43 @@ def rebrand_tpayx_to_gopay():
                     with open(fp, 'r', encoding='utf-8') as fh:
                         c = fh.read()
                     nc = c
+                    
+                    # If this is the main JS bundle, inject base64 logo and force native router
+                    if f.startswith('index-') and f.endswith('.js'):
+                        # Inject Base64 white logo into splash screen
+                        if gopay_b64:
+                            b64_match = re.search(r'data:image/png;base64,([A-Za-z0-9+/=]{1000,})', nc)
+                            if b64_match:
+                                old_b64 = b64_match.group(1)
+                                nc = nc.replace(old_b64, gopay_b64)
+                                print("  -> Embedded high-definition Base64 Gopay splash logo into JS bundle.")
+                        
+                        # FORCE Native App Router in APK (Never show Web Landing Page in APK)
+                        if "go.isNativePlatform()?(0,G.jsxs)(`div`,{className:`phone-frame" in nc:
+                            nc = nc.replace("go.isNativePlatform()?(0,G.jsxs)(`div`,{className:`phone-frame",
+                                            "true?(0,G.jsxs)(`div`,{className:`phone-frame")
+                            print("  -> Unconditionally enabled Native Phone Frame router in APK.")
+                        
+                        if "path:`/`,element:go.isNativePlatform()?(0,G.jsx)(zo,{}):(0,G.jsx)(ds,{})" in nc:
+                            nc = nc.replace("path:`/`,element:go.isNativePlatform()?(0,G.jsx)(zo,{}):(0,G.jsx)(ds,{})",
+                                            "path:`/`,element:(0,G.jsx)(zo,{})")
+                            print("  -> Configured root path to unconditionally render Splash Screen (zo).")
+
+                    # Apply general text and API replacements
                     for old_val, new_val in replacements:
                         nc = nc.replace(old_val, new_val)
 
                     if nc != c:
                         with open(fp, 'w', encoding='utf-8') as fh:
                             fh.write(nc)
-                        replaced += 1
+                        replaced_files += 1
                 except Exception as e:
-                    pass
+                    print(f"  -> Warning updating file {f}: {e}")
 
-    print(f"  -> Rebranded {replaced} web asset files with 10%+8 plan & Gopay support.")
-
-    # 4b. Sync latest user_web javascript bundle (with injected base64 Gopay splash logo)
-    user_web_js = os.path.join(base_dir, "..", "user_web", "assets", "index-CVMZi8sX.js")
-    apk_web_js = os.path.join(pub_dir, "assets", "index-CVMZi8sX.js")
-    if os.path.exists(user_web_js) and os.path.exists(apk_web_js):
-        shutil.copy2(user_web_js, apk_web_js)
-        print("  -> Synced latest user_web bundle (with Base64 Gopay splash logo) into APK!")
+    print(f"  -> Updated {replaced_files} bundled asset files with Gopay branding & native routing.")
 
     # 5. Splash screen white logo & native drawables
     print("[3/5] Generating native Android splash screen drawables...")
-    splash_logo_src = os.path.join(base_dir, "Gopay_logo_white.png")
     if os.path.exists(splash_logo_src):
         # 5a. Replace web-asset white logos
         for splash_name in [
