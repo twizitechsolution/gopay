@@ -893,7 +893,9 @@ const query = {
         const res = await queryMysql(sql, params);
         return {
           changes: res ? (res.affectedRows || 0) : 0,
-          lastInsertRowid: res ? (res.insertId || 0) : 0
+          lastInsertRowid: res ? (res.insertId || 0) : 0,
+          lastID: res ? (res.insertId || 0) : 0,
+          insertId: res ? (res.insertId || 0) : 0
         };
       }
     } catch (err) {
@@ -1492,7 +1494,8 @@ async function initDb() {
           'ALTER TABLE `orders` ADD COLUMN `seller_id` INT DEFAULT NULL',
           'ALTER TABLE `orders` ADD COLUMN `receiver_details` TEXT DEFAULT NULL',
           'ALTER TABLE `orders` ADD COLUMN `timer_expiry` DATETIME DEFAULT NULL',
-          'ALTER TABLE `orders` ADD COLUMN `screenshot_path` TEXT DEFAULT NULL'
+          'ALTER TABLE `orders` ADD COLUMN `screenshot_path` TEXT DEFAULT NULL',
+          'ALTER TABLE `user_tasks` ADD COLUMN `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'
         ];
         for (const sql of columnsToAdd) {
           try { await queryMysql(sql); } catch (_) {}

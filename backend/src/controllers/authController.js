@@ -231,13 +231,13 @@ exports.signup = async (req, res) => {
       VALUES (?, ?, ?, ?, ?)
     `, [uid, mobile, passwordHash, refCode, parentId]);
 
-    const userId = result.lastID;
+    const userId = result.lastID || result.lastInsertRowid || result.insertId;
 
     // Create user tasks defaults
     for (const taskKey of ['set_pin', 'add_support', 'join_bot']) {
       try {
         await query.run(`
-          INSERT OR IGNORE INTO user_tasks (user_id, task_key, completed, claimed)
+          INSERT IGNORE INTO user_tasks (user_id, task_key, completed, claimed)
           VALUES (?, ?, 0, 0)
         `, [userId, taskKey]);
       } catch (tErr) {}

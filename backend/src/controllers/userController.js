@@ -54,21 +54,40 @@ exports.setPin = async (req, res) => {
   try {
     await query.run('UPDATE users SET pin = ? WHERE id = ?', [pin, userId]);
     
-    // Complete Set PIN Task
-    const task = await query.get('SELECT completed, claimed FROM user_tasks WHERE user_id = ? AND task_key = "set_pin"', [userId]);
-    if (task && task.completed === 0) {
-      await query.run('UPDATE user_tasks SET completed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND task_key = "set_pin"', [userId]);
-      // Reward 20 TCoin
+    // Complete Set PIN Task - STRICT SINGLE REWARD AUDIT
+    const existingReward = await query.get(
+      'SELECT id FROM transactions WHERE user_id = ? AND type = "Task Reward" AND description LIKE "%Set PIN%" LIMIT 1',
+      [userId]
+    );
+
+    let task = await query.get('SELECT completed, claimed FROM user_tasks WHERE user_id = ? AND task_key = "set_pin"', [userId]);
+    if (!task) {
+      try {
+        await query.run('INSERT IGNORE INTO user_tasks (user_id, task_key, completed, claimed) VALUES (?, "set_pin", 1, 1)', [userId]);
+      } catch (_) {}
+    } else {
+      await query.run('UPDATE user_tasks SET completed = 1, claimed = 1 WHERE user_id = ? AND task_key = "set_pin"', [userId]);
+    }
+
+    if (!existingReward && (!task || task.completed === 0 || task.claimed === 0)) {
+      // Reward 20 TCoin ONCE
       await query.run('UPDATE users SET bcoin_balance = bcoin_balance + 20 WHERE id = ?', [userId]);
-      // Log transaction
+      try {
+        const { dbData } = require('../db');
+        const memUser = (dbData.users || []).find(u => u.id == userId);
+        if (memUser) memUser.bcoin_balance = Number(memUser.bcoin_balance || 0) + 20;
+      } catch (_) {}
+
       const user = await query.get('SELECT bcoin_balance FROM users WHERE id = ?', [userId]);
       await query.run(`
         INSERT INTO transactions (user_id, type, amount, balance_after, description)
         VALUES (?, 'Task Reward', 20.0, ?, 'Completed Set PIN task')
-      `, [userId, user.bcoin_balance]);
+      `, [userId, user ? user.bcoin_balance : 20.0]);
+
+      return res.json({ success: true, message: 'PIN set successfully and 20 TCoin rewarded!' });
     }
 
-    return res.json({ success: true, message: 'PIN set successfully and 20 TCoin rewarded!' });
+    return res.json({ success: true, message: 'PIN set successfully!' });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Internal Server Error' });
@@ -84,29 +103,45 @@ exports.completeTask = async (req, res) => {
   }
 
   try {
-    let task = await query.get('SELECT completed FROM user_tasks WHERE user_id = ? AND task_key = ?', [userId, taskKey]);
+    const taskTitle = taskKey === 'add_support' ? 'Add Support' : 'Join Bot';
+    const descPattern = `%${taskTitle}%`;
+
+    // 1. Strict check in transactions table: has this user EVER received a reward for this task?
+    const existingReward = await query.get(
+      'SELECT id FROM transactions WHERE user_id = ? AND type = "Task Reward" AND description LIKE ? LIMIT 1',
+      [userId, descPattern]
+    );
+
+    // 2. Check user_tasks row
+    let task = await query.get('SELECT completed, claimed FROM user_tasks WHERE user_id = ? AND task_key = ?', [userId, taskKey]);
     if (!task) {
       try {
-        await query.run('INSERT INTO user_tasks (user_id, task_key, completed) VALUES (?, ?, 0)', [userId, taskKey]);
+        await query.run('INSERT IGNORE INTO user_tasks (user_id, task_key, completed, claimed) VALUES (?, ?, 1, 1)', [userId, taskKey]);
       } catch (_) {}
-      task = { completed: 0 };
+    } else {
+      await query.run('UPDATE user_tasks SET completed = 1, claimed = 1 WHERE user_id = ? AND task_key = ?', [userId, taskKey]);
     }
 
-    if (task.completed === 0) {
-      await query.run('UPDATE user_tasks SET completed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND task_key = ?', [userId, taskKey]);
-      // Reward 20 TCoin
-      await query.run('UPDATE users SET bcoin_balance = bcoin_balance + 20 WHERE id = ?', [userId]);
-      // Log transaction
-      const user = await query.get('SELECT bcoin_balance FROM users WHERE id = ?', [userId]);
-      await query.run(`
-        INSERT INTO transactions (user_id, type, amount, balance_after, description)
-        VALUES (?, 'Task Reward', 20.0, ?, ?)
-      `, [userId, user.bcoin_balance, `Completed ${taskKey === 'add_support' ? 'Add Support' : 'Join Bot'} task`]);
-
-      return res.json({ success: true, message: 'Task completed! 20 TCoin rewarded.' });
+    // If already rewarded or marked completed, return immediately without awarding any money!
+    if (existingReward || (task && (task.completed === 1 || task.claimed === 1))) {
+      return res.json({ success: true, message: 'Task already completed.' });
     }
 
-    return res.json({ success: true, message: 'Task already completed.' });
+    // Reward 20 TCoin ONCE
+    await query.run('UPDATE users SET bcoin_balance = bcoin_balance + 20 WHERE id = ?', [userId]);
+    try {
+      const { dbData } = require('../db');
+      const memUser = (dbData.users || []).find(u => u.id == userId);
+      if (memUser) memUser.bcoin_balance = Number(memUser.bcoin_balance || 0) + 20;
+    } catch (_) {}
+
+    const user = await query.get('SELECT bcoin_balance FROM users WHERE id = ?', [userId]);
+    await query.run(`
+      INSERT INTO transactions (user_id, type, amount, balance_after, description)
+      VALUES (?, 'Task Reward', 20.0, ?, ?)
+    `, [userId, user ? user.bcoin_balance : 20.0, `Completed ${taskTitle} task`]);
+
+    return res.json({ success: true, message: 'Task completed! 20 TCoin rewarded.' });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Internal Server Error' });
@@ -116,6 +151,12 @@ exports.completeTask = async (req, res) => {
 exports.claimNewbieBonus = async (req, res) => {
   const userId = req.user.id;
   try {
+    // 1. Check if cumulative bonus was already claimed
+    const isClaimed = await query.get('SELECT id FROM transactions WHERE user_id = ? AND type = "Newbie Bonus" LIMIT 1', [userId]);
+    if (isClaimed) {
+      return res.status(400).json({ error: 'Newbie bonus already claimed' });
+    }
+
     // Verify all 3 tasks are completed
     const tasks = await query.all('SELECT task_key, completed FROM user_tasks WHERE user_id = ? AND task_key IN ("set_pin", "add_support", "join_bot")', [userId]);
     const allCompleted = tasks.length === 3 && tasks.every(t => t.completed === 1);
@@ -124,26 +165,25 @@ exports.claimNewbieBonus = async (req, res) => {
       return res.status(400).json({ error: 'Please complete all basic newbie tasks first' });
     }
 
-    // Check if cumulative bonus was already claimed
-    const isClaimed = await query.get('SELECT id FROM transactions WHERE user_id = ? AND type = "Newbie Bonus" AND amount = 60.0', [userId]);
-    if (isClaimed) {
-      return res.status(400).json({ error: 'Newbie bonus already claimed' });
-    }
-
     // Credit bonus of ₹60
     await query.run('UPDATE users SET inr_balance = inr_balance + 60 WHERE id = ?', [userId]);
+    try {
+      const { dbData } = require('../db');
+      const memUser = (dbData.users || []).find(u => u.id == userId);
+      if (memUser) memUser.inr_balance = Number(memUser.inr_balance || 0) + 60;
+    } catch (_) {}
     
     // Log transaction
     const user = await query.get('SELECT inr_balance FROM users WHERE id = ?', [userId]);
     await query.run(`
       INSERT INTO transactions (user_id, type, amount, balance_after, description)
       VALUES (?, 'Newbie Bonus', 60.0, ?, 'Claimed ₹60 Cumulative Newbie Welcome Bonus')
-    `, [userId, user.inr_balance]);
+    `, [userId, user ? user.inr_balance : 60.0]);
 
     // Mark task claimed statuses
     await query.run('UPDATE user_tasks SET claimed = 1 WHERE user_id = ? AND task_key IN ("set_pin", "add_support", "join_bot")', [userId]);
 
-    return res.json({ success: true, message: 'Welcome bonus of ₹60 claimed successfully!', newInrBalance: user.inr_balance });
+    return res.json({ success: true, message: 'Welcome bonus of ₹60 claimed successfully!', newInrBalance: user ? user.inr_balance : 60.0 });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Internal Server Error' });
