@@ -34,15 +34,18 @@ const activeOtps = new Map();
 
 // Helper to save OTP both in-memory and in MySQL for persistence
 async function saveOtpRecord(mobile, otp) {
+  let normMobile = String(mobile || '').trim().replace(/\D/g, '');
+  if (normMobile.length > 10) normMobile = normMobile.slice(-10);
+  const normOtp = String(otp).trim();
   const expiresAt = Date.now() + 5 * 60 * 1000;
-  activeOtps.set(mobile, { otp, expiresAt });
+  activeOtps.set(normMobile, { otp: normOtp, expiresAt });
 
   try {
     const { isMysqlConnected, persistToMysql } = require('../mysql');
     if (isMysqlConnected()) {
       await persistToMysql('settings', {
-        key: 'otp_' + mobile,
-        value: JSON.stringify({ mobile, otp, expiresAt })
+        key: 'otp_' + normMobile,
+        value: JSON.stringify({ mobile: normMobile, otp: normOtp, expiresAt })
       }, 'upsert', 'key');
     }
   } catch (err) {
@@ -50,34 +53,47 @@ async function saveOtpRecord(mobile, otp) {
   }
 }
 
-// Helper to verify and consume OTP
+// Helper to verify and consume OTP - STRICT REAL OTP VERIFICATION ONLY
 async function verifyAndConsumeOtp(mobile, inputOtp) {
-  if (!inputOtp) return false;
-  if (inputOtp === '123456') return true;
+  if (!inputOtp || !mobile) return false;
 
-  const mem = activeOtps.get(mobile);
+  let normMobile = String(mobile || '').trim().replace(/\D/g, '');
+  if (normMobile.length > 10) normMobile = normMobile.slice(-10);
+  if (!normMobile || normMobile.length !== 10) return false;
+
+  const normOtp = String(inputOtp).trim();
+  // Must be a 6-digit numeric OTP
+  if (!normOtp || normOtp.length !== 6 || !/^\d{6}$/.test(normOtp)) {
+    return false;
+  }
+
+  // 1. Check in-memory store
+  const mem = activeOtps.get(normMobile);
   if (mem) {
-    if (mem.otp === inputOtp && Date.now() <= mem.expiresAt) {
-      activeOtps.delete(mobile);
+    const savedOtp = String(mem.otp).trim();
+    if (savedOtp === normOtp && Date.now() <= Number(mem.expiresAt)) {
+      activeOtps.delete(normMobile);
       try {
         const { isMysqlConnected, persistToMysql } = require('../mysql');
         if (isMysqlConnected()) {
-          persistToMysql('settings', { key: 'otp_' + mobile }, 'delete', 'key').catch(() => {});
+          persistToMysql('settings', { key: 'otp_' + normMobile }, 'delete', 'key').catch(() => {});
         }
       } catch (e) {}
       return true;
     }
   }
 
+  // 2. Check MySQL persistent store
   try {
     const { isMysqlConnected, fetchOneFromMysql, persistToMysql } = require('../mysql');
     if (isMysqlConnected()) {
-      const data = await fetchOneFromMysql('settings', 'key', 'otp_' + mobile);
+      const data = await fetchOneFromMysql('settings', 'key', 'otp_' + normMobile);
       if (data && data.value) {
         const otpRecord = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
-        if (otpRecord.otp === inputOtp && Date.now() <= Number(otpRecord.expiresAt)) {
-          persistToMysql('settings', { key: 'otp_' + mobile }, 'delete', 'key').catch(() => {});
-          activeOtps.delete(mobile);
+        const savedOtp = String(otpRecord.otp).trim();
+        if (savedOtp === normOtp && Date.now() <= Number(otpRecord.expiresAt)) {
+          persistToMysql('settings', { key: 'otp_' + normMobile }, 'delete', 'key').catch(() => {});
+          activeOtps.delete(normMobile);
           return true;
         }
       }
@@ -345,9 +361,12 @@ exports.changePassword = async (req, res) => {
 };
 
 exports.resetPassword = async (req, res) => {
-  const { mobile, password, confirmPassword, otp } = req.body;
+  let { mobile, password, confirmPassword, otp } = req.body;
+  mobile = String(mobile || '').trim().replace(/\D/g, '');
+  if (mobile.length > 10) mobile = mobile.slice(-10);
+  otp = String(otp || '').trim();
 
-  if (!mobile || !password || !confirmPassword || !otp) {
+  if (!mobile || mobile.length !== 10 || !password || !confirmPassword || !otp) {
     return res.status(400).json({ error: 'Please enter all fields' });
   }
 
