@@ -71,19 +71,18 @@ exports.changeAdminPassword = async (req, res) => {
     dbData.admin.password = newPassword;
     saveDb();
 
-    // Persist immediately to Supabase Cloud
+    // Persist immediately to MySQL
     try {
-      const { supabase, isSupabaseConnected } = require('../supabase');
-      if (isSupabaseConnected()) {
-        await supabase.from('settings').upsert({
+      const { isMysqlConnected, persistToMysql } = require('../mysql');
+      if (isMysqlConnected()) {
+        await persistToMysql('settings', {
           key: 'admin',
-          value: dbData.admin,
-          updated_at: new Date().toISOString()
-        });
-        console.log('[Admin] Password changed and persisted to Supabase successfully.');
+          value: dbData.admin
+        }, 'upsert', 'key');
+        console.log('[Admin] Password changed and persisted to MySQL successfully.');
       }
     } catch (e) {
-      console.error('[Admin] Error saving new password to Supabase:', e.message);
+      console.error('[Admin] Error saving new password to MySQL:', e.message);
     }
 
     return res.status(200).json({
@@ -270,32 +269,27 @@ exports.toggleUserBlock = async (req, res) => {
     const { id } = req.params;
     const { loadDb, dbData, saveDb } = require('../db');
     loadDb();
-    const { supabase, isSupabaseConnected } = require('../supabase');
+    const { isMysqlConnected, fetchOneFromMysql, queryMysql } = require('../mysql');
 
     let user = (dbData.users || []).find(u => u.id == id);
 
-    // Fetch user from Supabase to guarantee fresh data for all users (including those not in local cache)
-    if (isSupabaseConnected()) {
+    // Fetch user from MySQL to guarantee fresh data
+    if (isMysqlConnected()) {
       try {
-        const { data: suUser, error: suFindErr } = await supabase
-          .from('users')
-          .select('*')
-          .eq('id', id)
-          .maybeSingle();
-
-        if (suUser) {
+        const myUser = await fetchOneFromMysql('users', 'id', id);
+        if (myUser) {
           if (!user) {
-            user = suUser;
+            user = myUser;
             dbData.users = dbData.users || [];
-            dbData.users.push(suUser);
+            dbData.users.push(myUser);
           } else {
-            user.is_blocked = suUser.is_blocked;
-            user.uid = suUser.uid || user.uid;
-            user.mobile = suUser.mobile || user.mobile;
+            user.is_blocked = myUser.is_blocked;
+            user.uid = myUser.uid || user.uid;
+            user.mobile = myUser.mobile || user.mobile;
           }
         }
       } catch (err) {
-        console.warn('[toggleUserBlock] Supabase find warning:', err.message);
+        console.warn('[toggleUserBlock] MySQL find warning:', err.message);
       }
     }
 
@@ -307,27 +301,8 @@ exports.toggleUserBlock = async (req, res) => {
     user.is_blocked = newBlockedState;
     saveDb();
 
-    // Persist directly to Supabase as primary database
-    if (isSupabaseConnected()) {
-      try {
-        const { error: suUpdateErr } = await supabase
-          .from('users')
-          .update({ is_blocked: newBlockedState })
-          .eq('id', id);
-
-        if (suUpdateErr) {
-          console.error('[DB] Supabase block update error:', suUpdateErr.message);
-          return res.status(500).json({ error: 'Database update failed: ' + suUpdateErr.message });
-        }
-      } catch (sErr) {
-        console.error('[DB] Supabase block update exception:', sErr.message);
-        return res.status(500).json({ error: 'Database update failed: ' + sErr.message });
-      }
-    }
-
     // Update MySQL database directly
     try {
-      const { isMysqlConnected, queryMysql } = require('../mysql');
       if (isMysqlConnected()) {
         await queryMysql('UPDATE users SET is_blocked = ? WHERE id = ?', [newBlockedState ? 1 : 0, id]);
       }
@@ -376,12 +351,12 @@ exports.getReportsData = async (req, res) => {
     let allUsers = dbData.users || [];
 
     try {
-      const { supabase, isSupabaseConnected, fetchAll } = require('../supabase');
-      if (isSupabaseConnected()) {
+      const { isMysqlConnected, fetchAllFromMysql } = require('../mysql');
+      if (isMysqlConnected()) {
         const [ordersData, txnsData, usersData] = await Promise.all([
-          fetchAll('orders', '*', 'created_at', false, 20000),
-          fetchAll('transactions', '*', 'created_at', false, 20000),
-          fetchAll('users', 'id, uid, mobile, username, inr_balance, bcoin_balance, created_at', 'created_at', false, 20000)
+          fetchAllFromMysql('orders', 20000),
+          fetchAllFromMysql('transactions', 20000),
+          fetchAllFromMysql('users', 20000)
         ]);
         if (ordersData && ordersData.length > 0) {
           allOrders = ordersData;
@@ -394,7 +369,7 @@ exports.getReportsData = async (req, res) => {
         }
       }
     } catch (err) {
-      console.warn('[getReportsData] Supabase sync warning:', err.message);
+      console.warn('[getReportsData] MySQL sync warning:', err.message);
     }
 
     const matchesDate = (isoStr, targetDate) => {

@@ -58,7 +58,6 @@ async function persistToDb(table, record, operation = 'upsert', matchField = 'id
     console.error(`[MySQL Persist Error] ${table}:`, mErr.message);
   }
 }
-const persistToSupabase = persistToDb; // Backwards-compatible alias
 
 
 function saveDb(entity = null) {
@@ -1501,14 +1500,18 @@ async function initDb() {
           try { await queryMysql(sql); } catch (_) {}
         }
       } catch (_) {}
-      const [myUsers, myOrders, myWithdrawals, myTransactions, myBankAccounts, myProducts, myDisputes] = await Promise.all([
+      const [myUsers, myOrders, myWithdrawals, myTransactions, myBankAccounts, myProducts, myDisputes, myMessages, mySliders, myPriceRanges, myUserTasks] = await Promise.all([
         fetchAllFromMysql('users'),
         fetchAllFromMysql('orders'),
         fetchAllFromMysql('withdrawals'),
         fetchAllFromMysql('transactions'),
         fetchAllFromMysql('bank_accounts'),
         fetchAllFromMysql('products'),
-        fetchAllFromMysql('disputes')
+        fetchAllFromMysql('disputes'),
+        fetchAllFromMysql('messages'),
+        fetchAllFromMysql('sliders'),
+        fetchAllFromMysql('price_ranges'),
+        fetchAllFromMysql('user_tasks')
       ]);
 
       if (myUsers && myUsers.length > 0) {
@@ -1538,6 +1541,22 @@ async function initDb() {
       if (myDisputes && myDisputes.length > 0) {
         dbData.disputes = myDisputes;
         idTrackers.disputes = Math.max(idTrackers.disputes || 0, ...myDisputes.map(d => d.id || 0));
+      }
+      if (myMessages && myMessages.length > 0) {
+        dbData.messages = myMessages;
+        idTrackers.messages = Math.max(idTrackers.messages || 0, ...myMessages.map(m => m.id || 0));
+      }
+      if (mySliders && mySliders.length > 0) {
+        dbData.sliders = mySliders;
+        idTrackers.sliders = Math.max(idTrackers.sliders || 0, ...mySliders.map(s => s.id || 0));
+      }
+      if (myPriceRanges && myPriceRanges.length > 0) {
+        dbData.price_ranges = myPriceRanges;
+        idTrackers.price_ranges = Math.max(idTrackers.price_ranges || 0, ...myPriceRanges.map(pr => pr.id || 0));
+      }
+      if (myUserTasks && myUserTasks.length > 0) {
+        dbData.user_tasks = myUserTasks;
+        idTrackers.user_tasks = Math.max(idTrackers.user_tasks || 0, ...myUserTasks.map(ut => ut.id || 0));
       }
 
       const mySettings = await fetchAllFromMysql('settings');

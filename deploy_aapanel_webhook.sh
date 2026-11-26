@@ -21,7 +21,7 @@ if [ -d "$PROJECT_ROOT/.git" ]; then
     git reset --hard origin/main
 else
     echo "⚠️ Git repository not found at $PROJECT_ROOT. Please clone your repository first:"
-    echo "git clone <your-github-repo-url> $PROJECT_ROOT"
+    echo "git clone https://github.com/twizitechsolution/gopay.git $PROJECT_ROOT"
     exit 1
 fi
 

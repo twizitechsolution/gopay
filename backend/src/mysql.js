@@ -134,18 +134,74 @@ async function fetchWhereFromMysql(table, col, val, limit = 1000) {
   }
 }
 
+// Cache table columns & types to prevent unknown-column errors and format datetimes safely
+const tableSchemaCache = new Map();
+
+async function getTableSchema(table) {
+  if (tableSchemaCache.has(table)) return tableSchemaCache.get(table);
+  if (!isMysqlConnected()) return null;
+  try {
+    const [cols] = await pool.query(`SHOW COLUMNS FROM \`${table}\``);
+    const schema = {};
+    for (const c of cols || []) {
+      schema[c.Field] = (c.Type || '').toLowerCase();
+    }
+    tableSchemaCache.set(table, schema);
+    return schema;
+  } catch (err) {
+    return null;
+  }
+}
+
+function toMysqlDatetime(val) {
+  if (val === null || val === undefined || val === '') return null;
+  if (typeof val === 'number') {
+    const d = new Date(val);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 19).replace('T', ' ');
+    return null;
+  }
+  if (val instanceof Date) {
+    if (!isNaN(val.getTime())) return val.toISOString().slice(0, 19).replace('T', ' ');
+    return null;
+  }
+  const str = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(str)) return str;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(str)) {
+    const d = new Date(str);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 19).replace('T', ' ');
+  }
+  return str;
+}
+
 // Persist single record to MySQL table (insert, update, upsert, delete)
 async function persistToMysql(table, record, operation = 'upsert', matchField = 'id') {
   if (!isMysqlConnected() || !record) return;
 
   try {
-    const data = { ...record };
+    const schema = await getTableSchema(table);
+    const rawData = { ...record };
+    const data = {};
 
-    // Format complex types (arrays / objects) to JSON strings
-    for (const key of Object.keys(data)) {
-      if (Array.isArray(data[key]) || (typeof data[key] === 'object' && data[key] !== null && !(data[key] instanceof Date))) {
-        data[key] = JSON.stringify(data[key]);
+    // Filter to known columns if schema is available, and normalize values
+    for (const key of Object.keys(rawData)) {
+      if (schema && !Object.prototype.hasOwnProperty.call(schema, key)) {
+        continue;
       }
+      let val = rawData[key];
+      const colType = schema ? schema[key] : '';
+
+      if (Array.isArray(val) || (typeof val === 'object' && val !== null && !(val instanceof Date))) {
+        val = JSON.stringify(val);
+      } else if (colType.includes('datetime') || colType.includes('timestamp') || key === 'created_at' || key === 'updated_at') {
+        val = toMysqlDatetime(val);
+      } else if (colType.includes('tinyint(1)') && typeof val === 'boolean') {
+        val = val ? 1 : 0;
+      } else if ((colType.includes('int') || colType.includes('decimal') || colType.includes('double') || colType.includes('float')) && typeof val === 'boolean') {
+        val = val ? 1 : 0;
+      } else if (val === undefined) {
+        val = null;
+      }
+      data[key] = val;
     }
 
     if (operation === 'insert') {

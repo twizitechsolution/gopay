@@ -6,7 +6,8 @@ const fs = require('fs');
 
 const express = require('express');
 const cors = require('cors');
-const { initDb, query, dbData, idTrackers, saveDb, loadDb, persistToSupabase } = require('./db');
+const { initDb, query, dbData, idTrackers, saveDb, loadDb, persistToDb } = require('./db');
+const { isMysqlConnected, fetchOneFromMysql, fetchWhereFromMysql, fetchAllFromMysql, persistToMysql, queryMysql } = require('./mysql');
 
 // Controllers
 const authController = require('./controllers/authController');
@@ -90,7 +91,7 @@ app.get('/api/view-image', async (req, res) => {
     const { file } = req.query;
     if (!file) return res.status(400).send('File parameter is required');
 
-    // 1. Direct redirect if already a full remote URL (e.g. Supabase Storage)
+    // 1. Direct redirect if already a full remote URL
     if (file.startsWith('http://') || file.startsWith('https://')) {
       return res.redirect(302, file);
     }
@@ -127,19 +128,7 @@ app.get('/api/view-image', async (req, res) => {
       return res.sendFile(filePath);
     }
 
-    // 3. Fallback to Supabase Storage public URL
-    try {
-      const { supabase, isSupabaseConnected } = require('./supabase');
-      if (isSupabaseConnected()) {
-        const { data: pUrl } = supabase.storage.from('screenshots').getPublicUrl(safeFilename);
-        if (pUrl && pUrl.publicUrl) {
-          // If query param fallback=false or direct check, redirect
-          return res.redirect(302, pUrl.publicUrl);
-        }
-      }
-    } catch (_) {}
-
-    // 4. Clean SVG fallback image for orders where physical screenshot was archived
+    // 3. Clean SVG fallback image for orders where physical screenshot was archived
     const utrLabel = req.query.utr || 'VERIFIED';
     const orderLabel = req.query.order || safeFilename.substring(0, 24);
     const svgBadge = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">
@@ -170,7 +159,7 @@ app.get('/api/view-image', async (req, res) => {
 
 // Static serving for uploaded screenshots/files
 
-// Helper function to save base64 uploads (persists to Supabase Storage for serverless)
+// Helper function to save base64 uploads to local disk (/uploads/)
 async function saveBase64File(base64Str, prefix) {
   if (!base64Str) return null;
   if (base64Str.startsWith('http://') || base64Str.startsWith('https://')) return base64Str;
@@ -190,33 +179,12 @@ async function saveBase64File(base64Str, prefix) {
 
     const fileName = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 1000)}.${ext}`;
 
-    // 1. Try Supabase Storage upload first (permanent cloud storage across serverless lambdas)
-    try {
-      const { supabase, isSupabaseConnected } = require('./supabase');
-      if (isSupabaseConnected()) {
-        const { data: upData, error: upErr } = await supabase.storage
-          .from('screenshots')
-          .upload(fileName, buffer, { contentType: type, upsert: true });
-        if (!upErr && upData) {
-          const { data: pData } = supabase.storage.from('screenshots').getPublicUrl(fileName);
-          if (pData && pData.publicUrl) {
-            console.log('[Supabase Storage] Screenshot uploaded successfully:', pData.publicUrl);
-            return pData.publicUrl;
-          }
-        } else if (upErr) {
-          console.warn('[Supabase Storage Upload Warning]:', upErr.message);
-        }
-      }
-    } catch (sErr) {
-      console.warn('[Supabase Storage Upload Exception]:', sErr.message);
-    }
-
-    // 2. Fallback to local disk file write
+    // Save to local disk /public/uploads
     try {
       fs.writeFileSync(path.join(uploadsDir, fileName), buffer);
       return `/uploads/${fileName}`;
     } catch (e) {
-      console.warn('[Server] Upload disk write skipped in serverless:', e.message);
+      console.warn('[Server] Upload disk write skipped:', e.message);
       return base64Str;
     }
   } catch (err) {
@@ -250,13 +218,9 @@ app.get('/api/user/team', authMiddleware, userController.getTeamDetails);
 app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { supabase, isSupabaseConnected } = require('./supabase');
     let list = [];
-    if (isSupabaseConnected()) {
-      try {
-        const { data: suTxns } = await supabase.from('transactions').select('*').eq('user_id', userId).order('id', { ascending: false });
-        if (suTxns && suTxns.length > 0) list = suTxns;
-      } catch (_) {}
+    if (isMysqlConnected()) {
+      list = await fetchWhereFromMysql('transactions', 'user_id', userId, 500);
     }
     if (list.length === 0) {
       list = await query.all('SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC', [userId]);
@@ -295,15 +259,15 @@ app.get('/api/sliders', async (req, res) => {
 app.get('/api/products', async (req, res) => {
   try {
     loadDb();
-    try {
-      const { supabase, isSupabaseConnected } = require('./supabase');
-      if (isSupabaseConnected()) {
-        const { data } = await supabase.from('settings').select('*').eq('key', 'config').maybeSingle();
-        if (data && data.value) {
-          dbData.settings = { ...(dbData.settings || {}), ...data.value };
+    if (isMysqlConnected()) {
+      try {
+        const cfgRow = await fetchOneFromMysql('settings', 'key', 'config');
+        if (cfgRow && cfgRow.value) {
+          const parsed = typeof cfgRow.value === 'string' ? JSON.parse(cfgRow.value) : cfgRow.value;
+          dbData.settings = { ...(dbData.settings || {}), ...parsed };
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
     
     // Read Admin configured Min / Max order limits (defaults: 500 / 100000)
     const cfg = dbData.settings || {};
@@ -436,15 +400,6 @@ app.get('/api/settings', async (req, res) => {
         console.warn('[Settings] MySQL fetch error:', mErr.message);
       }
     }
-    try {
-      const { supabase, isSupabaseConnected } = require('./supabase');
-      if (isSupabaseConnected()) {
-        const { data } = await supabase.from('settings').select('*').eq('key', 'config').maybeSingle();
-        if (data && data.value) {
-          dbData.settings = { ...(dbData.settings || {}), ...data.value };
-        }
-      }
-    } catch (_) {}
     const config = dbData.settings || {};
     return res.json({ 
       success: true, 
@@ -817,47 +772,41 @@ app.post('/api/admin/system/run-cleanup', adminAuth, async (req, res) => {
   }
 });
 
-app.get('/api/admin/system/sync-supabase', async (req, res) => {
+app.get('/api/admin/system/sync-mysql', adminAuth, async (req, res) => {
   try {
-    const { supabase, isSupabaseConnected } = require('./supabase');
-    if (!isSupabaseConnected()) {
-      return res.status(500).json({ error: 'Supabase client not connected' });
+    if (!isMysqlConnected()) {
+      return res.status(500).json({ error: 'MySQL client not connected' });
     }
 
-    const { dbData } = require('./db');
-    
-    // Batch upsert users in chunks of 300
-    const cleanUsers = (dbData.users || []).map(u => ({
-      id: u.id,
-      uid: u.uid,
-      mobile: u.mobile,
-      username: u.username || `Gopay_${u.uid}`,
-      password_hash: u.password_hash,
-      pin: u.pin || null,
-      ref_code: u.ref_code,
-      parent_id: u.parent_id || null,
-      inr_balance: Number(u.inr_balance || 0),
-      bcoin_balance: Number(u.bcoin_balance || 0),
-      usdt_balance: Number(u.usdt_balance || 0),
-      total_earnings: Number(u.total_earnings || 0),
-      today_profit: Number(u.today_profit || 0),
-      yesterday_profit: Number(u.yesterday_profit || 0),
-      is_blocked: Boolean(u.is_blocked),
-      fcm_tokens: u.fcm_tokens || [],
-      created_at: u.created_at || new Date().toISOString()
-    }));
-
-    for (let i = 0; i < cleanUsers.length; i += 300) {
-      await supabase.from('users').upsert(cleanUsers.slice(i, i + 300));
+    for (const u of (dbData.users || [])) {
+      await persistToMysql('users', {
+        id: u.id,
+        uid: u.uid,
+        mobile: u.mobile,
+        username: u.username || `Gopay_${u.uid}`,
+        password_hash: u.password_hash,
+        pin: u.pin || null,
+        ref_code: u.ref_code,
+        parent_id: u.parent_id || null,
+        inr_balance: Number(u.inr_balance || 0),
+        bcoin_balance: Number(u.bcoin_balance || 0),
+        usdt_balance: Number(u.usdt_balance || 0),
+        total_earnings: Number(u.total_earnings || 0),
+        today_profit: Number(u.today_profit || 0),
+        yesterday_profit: Number(u.yesterday_profit || 0),
+        is_blocked: Boolean(u.is_blocked),
+        fcm_tokens: u.fcm_tokens || [],
+        created_at: u.created_at || new Date().toISOString()
+      }, 'upsert', 'id');
     }
 
-    // Verify count in Supabase
-    const { count: finalCount } = await supabase.from('users').select('*', { count: 'exact', head: true });
+    const rows = await queryMysql('SELECT COUNT(*) AS cnt FROM users');
+    const finalCount = rows && rows[0] ? Number(rows[0].cnt) : 0;
 
     return res.json({
       success: true,
-      message: 'Supabase sync completed successfully!',
-      usersCountInSupabase: finalCount
+      message: 'MySQL sync completed successfully!',
+      usersCountInMysql: finalCount
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -879,24 +828,19 @@ app.post('/api/admin/users/:userId/withdraw', adminAuth, async (req, res) => {
     }
     const cleanUtr = utr.trim();
 
-    const { supabase, isSupabaseConnected } = require('./supabase');
     loadDb();
 
-    // 1. Fetch user directly from Supabase (source of truth) with local fallback
+    // 1. Fetch user directly from MySQL with local fallback
     let user = null;
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
-        const { data: suUser } = await supabase.from('users').select('*').eq('id', userId).maybeSingle();
-        if (suUser) user = suUser;
+        user = await fetchOneFromMysql('users', 'id', userId);
       } catch (e) {
-        console.warn('[AdminWithdraw] Supabase user query error:', e.message);
+        console.warn('[AdminWithdraw] MySQL user query error:', e.message);
       }
     }
     if (!user) {
       user = (dbData.users || []).find(u => u.id == userId);
-    }
-    if (!user) {
-      user = await query.get('SELECT * FROM users WHERE id = ?', [userId]);
     }
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -909,12 +853,14 @@ app.post('/api/admin/users/:userId/withdraw', adminAuth, async (req, res) => {
       });
     }
 
-    // 2. Fetch user's active bank details if available, otherwise fallback cleanly (do NOT block admin)
+    // 2. Fetch user's active bank details if available
     let bank = null;
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
-        const { data: suBank } = await supabase.from('bank_accounts').select('*').eq('user_id', userId).order('status', { ascending: true }).limit(1).maybeSingle();
-        if (suBank) bank = suBank;
+        const myBanks = await fetchWhereFromMysql('bank_accounts', 'user_id', userId, 10);
+        if (myBanks && myBanks.length > 0) {
+          bank = myBanks.find(b => b.status === 'Active') || myBanks[0];
+        }
       } catch (_) {}
     }
     if (!bank) {
@@ -931,27 +877,26 @@ app.post('/api/admin/users/:userId/withdraw', adminAuth, async (req, res) => {
     const payoutId = 'MWD_' + String(Date.now());
     const desc = `Bank: ${bankName}, A/C: ${accNumber}, Holder: ${accHolder}, UTR: ${cleanUtr}, TXID: ${payoutId}, Note: Manual withdrawal processed by administrator`;
 
-    // 3. Update user balance in Supabase
-    if (isSupabaseConnected()) {
+    // 3. Update user balance in MySQL & local memory
+    if (isMysqlConnected()) {
       try {
-        await supabase.from('users').update({ bcoin_balance: newBcoinBalance }).eq('id', userId);
+        await queryMysql('UPDATE users SET bcoin_balance = ? WHERE id = ?', [newBcoinBalance, userId]);
       } catch (e) {
-        console.warn('[AdminWithdraw] Supabase user update error:', e.message);
+        console.warn('[AdminWithdraw] MySQL user update error:', e.message);
       }
     }
-    // Update local memory
     user.bcoin_balance = newBcoinBalance;
     const memUser = (dbData.users || []).find(u => u.id == userId);
     if (memUser) memUser.bcoin_balance = newBcoinBalance;
     saveDb();
 
-    // 4. Insert transaction record (Withdraw) into Supabase & local DB
+    // 4. Insert transaction record (Withdraw) into MySQL & local DB
     let nextTxId = (idTrackers.transactions || 0) + 1;
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
-        const { data: maxTx } = await supabase.from('transactions').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-        if (maxTx && maxTx.id) {
-          nextTxId = Math.max(nextTxId, Number(maxTx.id) + 1);
+        const rows = await queryMysql('SELECT MAX(id) AS maxId FROM transactions');
+        if (rows && rows[0] && rows[0].maxId) {
+          nextTxId = Math.max(nextTxId, Number(rows[0].maxId) + 1);
         }
       } catch (e) {
         console.warn('Error fetching max tx id:', e.message);
@@ -969,27 +914,18 @@ app.post('/api/admin/users/:userId/withdraw', adminAuth, async (req, res) => {
       created_at: nowIso
     };
 
-    if (isSupabaseConnected()) {
-      try {
-        const { data: insertedTx, error: insErr } = await supabase.from('transactions').insert([txRecord]).select().maybeSingle();
-        if (insErr) {
-          console.warn('[AdminWithdraw] Supabase transaction insert error:', insErr.message);
-        } else if (insertedTx && insertedTx.id) {
-          txRecord.id = insertedTx.id;
-        }
-      } catch (e) {
-        console.warn('[AdminWithdraw] Supabase transaction insert exception:', e.message);
-      }
+    if (isMysqlConnected()) {
+      await persistToMysql('transactions', txRecord, 'upsert', 'id');
     }
     (dbData.transactions = dbData.transactions || []).push(txRecord);
 
-    // 5. Insert completed withdrawal record into Supabase & local DB
+    // 5. Insert completed withdrawal record into MySQL & local DB
     let nextWId = (idTrackers.withdrawals || 0) + 1;
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
-        const { data: maxW } = await supabase.from('withdrawals').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-        if (maxW && maxW.id) {
-          nextWId = Math.max(nextWId, Number(maxW.id) + 1);
+        const rows = await queryMysql('SELECT MAX(id) AS maxId FROM withdrawals');
+        if (rows && rows[0] && rows[0].maxId) {
+          nextWId = Math.max(nextWId, Number(rows[0].maxId) + 1);
         }
       } catch (e) {
         console.warn('Error fetching max withdrawal id:', e.message);
@@ -1009,17 +945,8 @@ app.post('/api/admin/users/:userId/withdraw', adminAuth, async (req, res) => {
       created_at: nowIso
     };
 
-    if (isSupabaseConnected()) {
-      try {
-        const { data: insertedW, error: insWErr } = await supabase.from('withdrawals').insert([withdrawalRecord]).select().maybeSingle();
-        if (insWErr) {
-          console.warn('[AdminWithdraw] Supabase withdrawal insert error:', insWErr.message);
-        } else if (insertedW && insertedW.id) {
-          withdrawalRecord.id = insertedW.id;
-        }
-      } catch (e) {
-        console.warn('[AdminWithdraw] Supabase withdrawal insert exception:', e.message);
-      }
+    if (isMysqlConnected()) {
+      await persistToMysql('withdrawals', withdrawalRecord, 'upsert', 'id');
     }
     (dbData.withdrawals = dbData.withdrawals || []).push(withdrawalRecord);
     saveDb();
@@ -1044,7 +971,6 @@ app.post('/api/admin/users/:userId/withdraw', adminAuth, async (req, res) => {
 app.get('/api/admin/users/:userId/details', adminAuth, async (req, res) => {
   try {
     const userId = req.params.userId;
-    const { supabase, isSupabaseConnected } = require('./supabase');
     loadDb();
 
     let user = null;
@@ -1055,30 +981,29 @@ app.get('/api/admin/users/:userId/details', adminAuth, async (req, res) => {
     let downline = [];
     let parentUser = null;
 
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
         const [uRes, bRes, oRes, wRes, txRes, dRes] = await Promise.all([
-          supabase.from('users').select('*').eq('id', userId).maybeSingle(),
-          supabase.from('bank_accounts').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
-          supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
-          supabase.from('withdrawals').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
-          supabase.from('transactions').select('*').eq('user_id', userId).order('created_at', { ascending: false }),
-          supabase.from('users').select('id, uid, username, mobile, bcoin_balance, created_at').eq('parent_id', userId).order('created_at', { ascending: false })
+          fetchOneFromMysql('users', 'id', userId),
+          fetchWhereFromMysql('bank_accounts', 'user_id', userId, 100),
+          fetchWhereFromMysql('orders', 'user_id', userId, 500),
+          fetchWhereFromMysql('withdrawals', 'user_id', userId, 500),
+          fetchWhereFromMysql('transactions', 'user_id', userId, 500),
+          queryMysql('SELECT id, uid, username, mobile, bcoin_balance, created_at FROM users WHERE parent_id = ? ORDER BY created_at DESC', [userId])
         ]);
 
-        if (uRes && uRes.data) user = uRes.data;
-        if (bRes && bRes.data) banks = bRes.data;
-        if (oRes && oRes.data) orders = oRes.data;
-        if (wRes && wRes.data) withdrawals = wRes.data;
-        if (txRes && txRes.data) transactions = txRes.data;
-        if (dRes && dRes.data) downline = dRes.data;
+        if (uRes) user = uRes;
+        if (bRes) banks = bRes;
+        if (oRes) orders = oRes;
+        if (wRes) withdrawals = wRes;
+        if (txRes) transactions = txRes;
+        if (dRes) downline = dRes;
 
         if (user && user.parent_id) {
-          const { data: pData } = await supabase.from('users').select('id, uid, username, mobile').eq('id', user.parent_id).maybeSingle();
-          if (pData) parentUser = pData;
+          parentUser = await fetchOneFromMysql('users', 'id', user.parent_id);
         }
       } catch (e) {
-        console.warn('[UserDetails] Supabase query error:', e.message);
+        console.warn('[UserDetails] MySQL query error:', e.message);
       }
     }
 
@@ -1186,16 +1111,15 @@ app.get('/api/admin/users/:userId/withdrawals', adminAuth, async (req, res) => {
       .filter(o => o.user_id == userId && o.status === 'Completed')
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-    const { supabase, isSupabaseConnected } = require('./supabase');
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
-        const [txRes, wRes, ordRes] = await Promise.all([
-          supabase.from('transactions').select('*').eq('user_id', userId).eq('type', 'Withdraw').order('created_at', { ascending: false }).limit(500),
-          supabase.from('withdrawals').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(500),
-          supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(500)
+        const [txData, wData, ordData] = await Promise.all([
+          queryMysql('SELECT * FROM transactions WHERE user_id = ? AND type = "Withdraw" ORDER BY created_at DESC LIMIT 500', [userId]),
+          fetchWhereFromMysql('withdrawals', 'user_id', userId, 500),
+          fetchWhereFromMysql('orders', 'user_id', userId, 500)
         ]);
-        const wList = [...(wRes.data || [])];
-        (txRes.data || []).forEach(tx => {
+        const wList = [...(wData || [])];
+        (txData || []).forEach(tx => {
           if (!wList.some(w => (w.utr && tx.description && tx.description.includes(w.utr)) || Math.abs(Number(w.amount)) === Math.abs(Number(tx.amount)))) {
             wList.push({
               id: tx.id,
@@ -1209,8 +1133,8 @@ app.get('/api/admin/users/:userId/withdrawals', adminAuth, async (req, res) => {
         });
         wList.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         if (wList.length > 0) withdrawals = wList;
-        if (ordRes.data && ordRes.data.length > 0) deposits = ordRes.data;
-      } catch (sErr) {}
+        if (ordData && ordData.length > 0) deposits = ordData;
+      } catch (mErr) {}
     }
 
     return res.json({ success: true, withdrawals, deposits });
@@ -1230,16 +1154,15 @@ app.get('/api/admin/users/:userId/history', adminAuth, async (req, res) => {
       .filter(o => o.user_id == userId && o.status === 'Completed')
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-    const { supabase, isSupabaseConnected } = require('./supabase');
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
-        const [txRes, wRes, ordRes] = await Promise.all([
-          supabase.from('transactions').select('*').eq('user_id', userId).eq('type', 'Withdraw').order('created_at', { ascending: false }).limit(500),
-          supabase.from('withdrawals').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(500),
-          supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(500)
+        const [txData, wData, ordData] = await Promise.all([
+          queryMysql('SELECT * FROM transactions WHERE user_id = ? AND type = "Withdraw" ORDER BY created_at DESC LIMIT 500', [userId]),
+          fetchWhereFromMysql('withdrawals', 'user_id', userId, 500),
+          fetchWhereFromMysql('orders', 'user_id', userId, 500)
         ]);
-        const wList = [...(wRes.data || [])];
-        (txRes.data || []).forEach(tx => {
+        const wList = [...(wData || [])];
+        (txData || []).forEach(tx => {
           if (!wList.some(w => (w.utr && tx.description && tx.description.includes(w.utr)) || Math.abs(Number(w.amount)) === Math.abs(Number(tx.amount)))) {
             wList.push({
               id: tx.id,
@@ -1253,8 +1176,8 @@ app.get('/api/admin/users/:userId/history', adminAuth, async (req, res) => {
         });
         wList.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         if (wList.length > 0) withdrawals = wList;
-        if (ordRes.data && ordRes.data.length > 0) deposits = ordRes.data;
-      } catch (sErr) {}
+        if (ordData && ordData.length > 0) deposits = ordData;
+      } catch (mErr) {}
     }
 
     return res.json({ success: true, withdrawals, deposits });
@@ -1470,12 +1393,11 @@ app.post('/api/withdrawals', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance. You already have pending withdrawals matching your balance.' });
     }
 
-    const { supabase: sbClient, isSupabaseConnected: isSbConn } = require('./supabase');
     let newId = (idTrackers.withdrawals || 0) + 1;
-    if (isSbConn()) {
+    if (isMysqlConnected()) {
       try {
-        const { data: maxW } = await sbClient.from('withdrawals').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-        if (maxW && maxW.id) newId = Math.max(newId, Number(maxW.id) + 1);
+        const rows = await queryMysql('SELECT MAX(id) AS maxId FROM withdrawals');
+        if (rows && rows[0] && rows[0].maxId) newId = Math.max(newId, Number(rows[0].maxId) + 1);
       } catch (_) {}
     }
     idTrackers.withdrawals = Math.max(idTrackers.withdrawals || 0, newId);
@@ -1492,7 +1414,7 @@ app.post('/api/withdrawals', authMiddleware, async (req, res) => {
     dbData.withdrawals.push(newWithdrawal);
     
     saveDb();
-    persistToSupabase('withdrawals', newWithdrawal, 'upsert', 'id');
+    await persistToDb('withdrawals', newWithdrawal, 'upsert', 'id');
 
     return res.json({ success: true, message: 'Withdrawal request registered successfully.' });
   } catch (err) {
@@ -1514,7 +1436,7 @@ app.post('/api/user/register-fcm', authMiddleware, async (req, res) => {
       user.fcm_tokens = user.fcm_tokens || [];
       if (!user.fcm_tokens.includes(token)) {
         user.fcm_tokens.push(token);
-        saveDb();
+        saveDb({ table: 'users', record: user });
       }
     }
     return res.json({ success: true });
@@ -1530,14 +1452,11 @@ app.get('/api/user/p2p-requests', authMiddleware, async (req, res) => {
     const userId = req.user.id;
     let orders = [];
 
-    const { supabase, isSupabaseConnected } = require('./supabase');
-    if (isSupabaseConnected()) {
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('receiver_id', userId)
-        .eq('status', 'Confirming')
-        .order('id', { ascending: false });
+    if (isMysqlConnected()) {
+      const data = await queryMysql(
+        'SELECT * FROM orders WHERE receiver_id = ? AND status = "Confirming" ORDER BY id DESC',
+        [userId]
+      );
 
       if (data && data.length > 0) {
         orders = data;
@@ -1555,9 +1474,9 @@ app.get('/api/user/p2p-requests', authMiddleware, async (req, res) => {
 
     const list = await Promise.all(orders.map(async o => {
       let buyer = (dbData.users || []).find(u => u.id == o.user_id);
-      if (!buyer && isSupabaseConnected()) {
-        const { data: suBuyer } = await supabase.from('users').select('id, uid, username, mobile').eq('id', o.user_id).maybeSingle();
-        if (suBuyer) buyer = suBuyer;
+      if (!buyer && isMysqlConnected()) {
+        const myBuyer = await fetchOneFromMysql('users', 'id', o.user_id);
+        if (myBuyer) buyer = myBuyer;
       }
       buyer = buyer || {};
       return {
@@ -1587,14 +1506,13 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
     const userId = req.user.id;
 
     loadDb();
-    const { supabase, isSupabaseConnected } = require('./supabase');
 
     let order = (dbData.orders || []).find(o => o.order_id === orderId && o.receiver_id == userId);
-    if (!order && isSupabaseConnected()) {
-      const { data: suOrder } = await supabase.from('orders').select('*').eq('order_id', orderId).maybeSingle();
-      if (suOrder && suOrder.receiver_id == userId) {
-        order = suOrder;
-        (dbData.orders = dbData.orders || []).push(suOrder);
+    if (!order && isMysqlConnected()) {
+      const myOrder = await fetchOneFromMysql('orders', 'order_id', orderId);
+      if (myOrder && myOrder.receiver_id == userId) {
+        order = myOrder;
+        (dbData.orders = dbData.orders || []).push(myOrder);
       }
     }
 
@@ -1607,20 +1525,20 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
     }
 
     let receiver = (dbData.users || []).find(u => u.id == userId);
-    if (!receiver && isSupabaseConnected()) {
-      const { data: suRec } = await supabase.from('users').select('*').eq('id', userId).maybeSingle();
-      if (suRec) {
-        receiver = suRec;
-        (dbData.users = dbData.users || []).push(suRec);
+    if (!receiver && isMysqlConnected()) {
+      const myRec = await fetchOneFromMysql('users', 'id', userId);
+      if (myRec) {
+        receiver = myRec;
+        (dbData.users = dbData.users || []).push(myRec);
       }
     }
 
     let buyer = (dbData.users || []).find(u => u.id == order.user_id);
-    if (!buyer && isSupabaseConnected()) {
-      const { data: suBuy } = await supabase.from('users').select('*').eq('id', order.user_id).maybeSingle();
-      if (suBuy) {
-        buyer = suBuy;
-        (dbData.users = dbData.users || []).push(suBuy);
+    if (!buyer && isMysqlConnected()) {
+      const myBuy = await fetchOneFromMysql('users', 'id', order.user_id);
+      if (myBuy) {
+        buyer = myBuy;
+        (dbData.users = dbData.users || []).push(myBuy);
       }
     }
 
@@ -1641,10 +1559,10 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
     buyer.total_earnings = Number(buyer.total_earnings || 0) + Number(order.expected_income || 0);
     buyer.today_profit = Number(buyer.today_profit || 0) + Number(order.expected_income || 0);
 
-    // Persist to Supabase immediately
-    persistToSupabase('users', receiver, 'upsert', 'id');
-    persistToSupabase('users', buyer, 'upsert', 'id');
-    persistToSupabase('orders', order, 'upsert', 'id');
+    // Persist to MySQL immediately
+    await persistToDb('users', receiver, 'upsert', 'id');
+    await persistToDb('users', buyer, 'upsert', 'id');
+    await persistToDb('orders', order, 'upsert', 'id');
 
     // 1. Log the principal Deposit transaction for the buyer
     const depositTxId = ++idTrackers.transactions;
@@ -1658,7 +1576,7 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
       created_at: new Date().toISOString()
     };
     (dbData.transactions = dbData.transactions || []).push(depTx);
-    persistToSupabase('transactions', depTx, 'upsert', 'id');
+    await persistToDb('transactions', depTx, 'upsert', 'id');
 
     // 2. Log the Interest bonus Commission transaction for the buyer
     const bonusTxId = ++idTrackers.transactions;
@@ -1672,14 +1590,14 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
       created_at: new Date().toISOString()
     };
     dbData.transactions.push(bonusTx);
-    persistToSupabase('transactions', bonusTx, 'upsert', 'id');
+    await persistToDb('transactions', bonusTx, 'upsert', 'id');
 
     // 3. Log Withdraw transaction for receiver (sell history)
     let nextTxId = (idTrackers.transactions || 0) + 1;
-    if (isSupabaseConnected()) {
+    if (isMysqlConnected()) {
       try {
-        const { data: maxTx } = await supabase.from('transactions').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-        if (maxTx && maxTx.id) nextTxId = Math.max(nextTxId, Number(maxTx.id) + 1);
+        const rows = await queryMysql('SELECT MAX(id) AS maxId FROM transactions');
+        if (rows && rows[0] && rows[0].maxId) nextTxId = Math.max(nextTxId, Number(rows[0].maxId) + 1);
       } catch (_) {}
     }
     idTrackers.transactions = Math.max(idTrackers.transactions || 0, nextTxId);
@@ -1696,28 +1614,28 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
       created_at: new Date().toISOString()
     };
     dbData.transactions.push(recTx);
-    persistToSupabase('transactions', recTx, 'upsert', 'id');
+    await persistToDb('transactions', recTx, 'upsert', 'id');
 
     // Check matched withdrawal request or create completed withdrawal record
     let matchedW = null;
     if (order.withdrawal_id) {
       matchedW = (dbData.withdrawals || []).find(x => x.id == order.withdrawal_id);
-      if (!matchedW && isSupabaseConnected()) {
-        const { data: suW } = await supabase.from('withdrawals').select('*').eq('id', order.withdrawal_id).maybeSingle();
-        if (suW) matchedW = suW;
+      if (!matchedW && isMysqlConnected()) {
+        const myW = await fetchOneFromMysql('withdrawals', 'id', order.withdrawal_id);
+        if (myW) matchedW = myW;
       }
     }
     if (matchedW) {
       matchedW.status = 'Completed';
       matchedW.amount_pending = 0;
       matchedW.utr = order.utr || matchedW.utr || 'P2P_COMPLETED';
-      persistToSupabase('withdrawals', matchedW, 'upsert', 'id');
+      await persistToDb('withdrawals', matchedW, 'upsert', 'id');
     } else {
       let nextWId = (idTrackers.withdrawals || 0) + 1;
-      if (isSupabaseConnected()) {
+      if (isMysqlConnected()) {
         try {
-          const { data: maxW } = await supabase.from('withdrawals').select('id').order('id', { ascending: false }).limit(1).maybeSingle();
-          if (maxW && maxW.id) nextWId = Math.max(nextWId, Number(maxW.id) + 1);
+          const rows = await queryMysql('SELECT MAX(id) AS maxId FROM withdrawals');
+          if (rows && rows[0] && rows[0].maxId) nextWId = Math.max(nextWId, Number(rows[0].maxId) + 1);
         } catch (_) {}
       }
       idTrackers.withdrawals = Math.max(idTrackers.withdrawals || 0, nextWId);
@@ -1733,7 +1651,7 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
         created_at: new Date().toISOString()
       };
       (dbData.withdrawals = dbData.withdrawals || []).push(newW);
-      persistToSupabase('withdrawals', newW, 'upsert', 'id');
+      await persistToDb('withdrawals', newW, 'upsert', 'id');
     }
 
     saveDb();
@@ -1751,9 +1669,9 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
       for (let level = 1; level <= 3; level++) {
         if (!currentParentId) break;
         let parent = (dbData.users || []).find(u => u.id == currentParentId);
-        if (!parent && isSupabaseConnected()) {
-          const { data: suParent } = await supabase.from('users').select('*').eq('id', currentParentId).maybeSingle();
-          if (suParent) parent = suParent;
+        if (!parent && isMysqlConnected()) {
+          const myParent = await fetchOneFromMysql('users', 'id', currentParentId);
+          if (myParent) parent = myParent;
         }
         if (!parent) break;
 
@@ -1764,7 +1682,7 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
           parent.bcoin_balance = Number(parent.bcoin_balance || 0) + commAmount;
           parent.total_earnings = Number(parent.total_earnings || 0) + commAmount;
           parent.today_profit = Number(parent.today_profit || 0) + commAmount;
-          persistToSupabase('users', parent, 'upsert', 'id');
+          await persistToDb('users', parent, 'upsert', 'id');
 
           const commTxId = ++idTrackers.transactions;
           const commTx = {
@@ -1777,7 +1695,7 @@ app.post('/api/orders/:orderId/p2p-receive', authMiddleware, async (req, res) =>
             created_at: new Date().toISOString()
           };
           dbData.transactions.push(commTx);
-          persistToSupabase('transactions', commTx, 'upsert', 'id');
+          await persistToDb('transactions', commTx, 'upsert', 'id');
         }
         currentParentId = parent.parent_id;
       }
@@ -1803,14 +1721,13 @@ app.post('/api/orders/:orderId/p2p-dispute', authMiddleware, async (req, res) =>
     }
 
     loadDb();
-    const { supabase, isSupabaseConnected } = require('./supabase');
 
     let order = (dbData.orders || []).find(o => o.order_id === orderId && o.receiver_id == req.user.id);
-    if (!order && isSupabaseConnected()) {
-      const { data: suOrder } = await supabase.from('orders').select('*').eq('order_id', orderId).maybeSingle();
-      if (suOrder && suOrder.receiver_id == req.user.id) {
-        order = suOrder;
-        (dbData.orders = dbData.orders || []).push(suOrder);
+    if (!order && isMysqlConnected()) {
+      const myOrder = await fetchOneFromMysql('orders', 'order_id', orderId);
+      if (myOrder && myOrder.receiver_id == req.user.id) {
+        order = myOrder;
+        (dbData.orders = dbData.orders || []).push(myOrder);
       }
     }
 
@@ -1829,9 +1746,9 @@ app.post('/api/orders/:orderId/p2p-dispute', authMiddleware, async (req, res) =>
     }
 
     let receiver = (dbData.users || []).find(u => u.id == req.user.id);
-    if (!receiver && isSupabaseConnected()) {
-      const { data: suRec } = await supabase.from('users').select('*').eq('id', req.user.id).maybeSingle();
-      if (suRec) receiver = suRec;
+    if (!receiver && isMysqlConnected()) {
+      const myRec = await fetchOneFromMysql('users', 'id', req.user.id);
+      if (myRec) receiver = myRec;
     }
 
     if (!receiver) {
@@ -1844,11 +1761,11 @@ app.post('/api/orders/:orderId/p2p-dispute', authMiddleware, async (req, res) =>
 
     // Deduct the disputed amount immediately from their wallet
     receiver.bcoin_balance = Math.max(0, Number(receiver.bcoin_balance || 0) - Number(order.amount));
-    persistToSupabase('users', receiver, 'upsert', 'id');
+    await persistToDb('users', receiver, 'upsert', 'id');
 
     // Set order to Disputed
     order.status = 'Disputed';
-    persistToSupabase('orders', order, 'upsert', 'id');
+    await persistToDb('orders', order, 'upsert', 'id');
 
     // Add dispute record
     const newDisId = ++idTrackers.disputes;
@@ -1863,7 +1780,7 @@ app.post('/api/orders/:orderId/p2p-dispute', authMiddleware, async (req, res) =>
     };
     dbData.disputes = dbData.disputes || [];
     dbData.disputes.push(disputeRecord);
-    persistToSupabase('disputes', disputeRecord, 'upsert', 'id');
+    await persistToDb('disputes', disputeRecord, 'upsert', 'id');
 
     // Log a temporary Withdraw transaction for receiver showing it as Disputed
     const newTxId = ++idTrackers.transactions;
@@ -1881,7 +1798,7 @@ app.post('/api/orders/:orderId/p2p-dispute', authMiddleware, async (req, res) =>
       created_at: new Date().toISOString()
     };
     dbData.transactions.push(disTx);
-    persistToSupabase('transactions', disTx, 'upsert', 'id');
+    await persistToDb('transactions', disTx, 'upsert', 'id');
 
     saveDb();
 

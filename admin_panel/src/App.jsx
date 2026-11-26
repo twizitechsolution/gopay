@@ -2051,12 +2051,9 @@ const Dashboard = ({ token, handleLogout, activeTab, theme }) => {
                   const fname = encodeURIComponent((screenshotModal.url || '').split(/[/\\]/).filter(Boolean).pop() || '');
                   if (!e.target.dataset.tried) {
                     e.target.dataset.tried = '1';
-                    e.target.src = `https://hlhxkknqhiksjyilpmdc.supabase.co/storage/v1/object/public/screenshots/${fname}`;
+                    e.target.src = `/uploads/${fname}`;
                   } else if (e.target.dataset.tried === '1') {
                     e.target.dataset.tried = '2';
-                    e.target.src = `/uploads/${fname}`;
-                  } else if (e.target.dataset.tried === '2') {
-                    e.target.dataset.tried = '3';
                     e.target.src = `/api/view-image?file=${fname}&utr=${encodeURIComponent(screenshotModal.utr || '')}&order=${encodeURIComponent(screenshotModal.orderId || '')}`;
                   }
                 }}

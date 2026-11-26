@@ -17,10 +17,9 @@ Ab aapko files manually upload karne ki zaroorat nahi padegi! Jab bhi aap GitHub
 Apne computer ke terminal / PowerShell mein ye do commands chalayein:
 
 ```powershell
-git remote add origin https://github.com/your-username/gopay.git
+git remote add origin https://github.com/twizitechsolution/gopay.git
 git push -u origin main
 ```
-*(Apna actual GitHub URL replace karein).*
 
 ---
 
@@ -32,7 +31,7 @@ Apne aaPanel server terminal (SSH) mein jayein aur ye run karein:
 cd /www/wwwroot
 
 # 2. GitHub repository clone karein
-git clone https://github.com/your-username/gopay.git gopay
+git clone https://github.com/twizitechsolution/gopay.git gopay
 
 # 3. Backend dependencies install karein
 cd /www/wwwroot/gopay/backend
