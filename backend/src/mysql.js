@@ -97,7 +97,10 @@ function normalizeRow(row) {
 async function fetchAllFromMysql(table, limit = 50000) {
   if (!isMysqlConnected()) return [];
   try {
-    const [rows] = await pool.query(`SELECT * FROM \`${table}\` ORDER BY id DESC LIMIT ?`, [limit]);
+    const sql = table === 'settings'
+      ? `SELECT * FROM \`${table}\` LIMIT ?`
+      : `SELECT * FROM \`${table}\` ORDER BY id DESC LIMIT ?`;
+    const [rows] = await pool.query(sql, [limit]);
     return (rows || []).map(normalizeRow);
   } catch (err) {
     if (err.code !== 'ER_NO_SUCH_TABLE') {
